@@ -1,6 +1,7 @@
 export type ProsaUser = { id: string; username: string; displayName: string }
-export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null; peerUsername: string | null }
+export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null; peerUsername: string | null; unreadCount: number }
 export type ApiMessage = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string }
+export type ApiMessagePage = { messages: ApiMessage[]; nextCursor: string | null }
 export type ApiPerson = { id: string; userId?: string; username: string; displayName: string; relationship?: 'none' | 'incoming' | 'outgoing' | 'friend' }
 export type ApiFriendData = { friends: ApiPerson[]; incoming: ApiPerson[]; outgoing: ApiPerson[] }
 type AuthResult = { token: string; user: ProsaUser }
@@ -38,7 +39,8 @@ export const api = {
   me: () => request<{ user: ProsaUser }>('/me'),
   logout: async () => { try { await request('/auth/logout', { method: 'POST' }) } finally { localStorage.removeItem(tokenKey) } },
   conversations: () => request<{ conversations: ApiConversation[] }>('/conversations'),
-  messages: (id: string) => request<{ messages: ApiMessage[] }>(`/conversations/${encodeURIComponent(id)}/messages`),
+  messages: (id: string, before?: string | null) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  markRead: (id: string) => request<{ lastReadRowId: number }>(`/conversations/${encodeURIComponent(id)}/read`, { method: 'POST' }),
   sendMessage: (id: string, text: string) => request<{ message: ApiMessage }>(`/conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) }),
   searchUsers: (query: string) => request<{ users: ApiPerson[] }>(`/users/search?q=${encodeURIComponent(query)}`),
   friends: () => request<ApiFriendData>('/friends'),

@@ -1,10 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import './App.css'
 import { api, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiPerson, type ProsaUser } from './api'
 import { io } from 'socket.io-client'
 
 type Message = { id: string; author: string; time: string; text: string; mine?: boolean }
-type Conversation = { id: string; name: string; handle: string; initials: string; color: string; online?: boolean; preview: string; time: string; unread?: number; messages: Message[] }
+type Conversation = { id: string; name: string; handle: string; initials: string; color: string; online?: boolean; preview: string; time: string; unreadCount: number; olderCursor: string | null; messages: Message[] }
 
 function localTime(value: string) {
   return new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' }).format(new Date(value))
@@ -14,10 +14,11 @@ function fromApiMessage(message: ApiMessage, user: ProsaUser): Message {
   return { id: message.id, author: message.authorId === user.id ? 'Você' : message.author, time: localTime(message.createdAt), text: message.text, mine: message.authorId === user.id }
 }
 
-function fromApiConversation(conversation: ApiConversation, messages: ApiMessage[], user: ProsaUser): Conversation {
+function fromApiConversation(conversation: ApiConversation, page: { messages: ApiMessage[]; nextCursor: string | null }, user: ProsaUser): Conversation {
   const initials = conversation.name.split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase()
   const color = ['coral', 'blue', 'violet', 'green'][parseInt(conversation.id.slice(0, 2), 16) % 4]
-  return { id: conversation.id, name: conversation.name, handle: conversation.peerUsername ? `@${conversation.peerUsername}` : `@${user.username}`, initials, color, preview: messages.at(-1)?.text ?? 'Conversa criada', time: messages.at(-1) ? localTime(messages.at(-1)!.createdAt) : 'agora', messages: messages.map(message => fromApiMessage(message, user)) }
+  const messages = page.messages
+  return { id: conversation.id, name: conversation.name, handle: conversation.peerUsername ? `@${conversation.peerUsername}` : `@${user.username}`, initials, color, unreadCount: conversation.unreadCount, olderCursor: page.nextCursor, preview: conversation.preview ?? 'Conversa criada', time: conversation.lastMessageAt ? localTime(conversation.lastMessageAt) : 'agora', messages: messages.map(message => fromApiMessage(message, user)) }
 }
 
 function Icon({ name, size = 20 }: { name: string; size?: number }) {
@@ -51,19 +52,37 @@ function App() {
   const [authPassword, setAuthPassword] = useState('')
   const [loading, setLoading] = useState(() => api.hasSession())
   const [busy, setBusy] = useState(false)
+  const [loadingOlder, setLoadingOlder] = useState(false)
   const active = chats.find(chat => chat.id === activeId) ?? chats[0]
   const activeConversationId = active?.id
   const chatsRef = useRef(chats)
+  const messageScrollRef = useRef<HTMLDivElement>(null)
+  const preserveScrollRef = useRef<{ height: number; top: number } | null>(null)
+  const nearBottomRef = useRef(true)
+  const renderedMessageCountRef = useRef(0)
   const filtered = useMemo(() => chats.filter(chat => `${chat.name} ${chat.handle}`.toLowerCase().includes(query.toLowerCase())), [chats, query])
 
   useEffect(() => { chatsRef.current = chats }, [chats])
+
+  useLayoutEffect(() => {
+    const scroller = messageScrollRef.current
+    if (!scroller) return
+    if (preserveScrollRef.current) {
+      const previous = preserveScrollRef.current
+      scroller.scrollTop = previous.top + scroller.scrollHeight - previous.height
+      preserveScrollRef.current = null
+    } else if (active && renderedMessageCountRef.current !== active.messages.length && nearBottomRef.current) {
+      scroller.scrollTop = scroller.scrollHeight
+    }
+    renderedMessageCountRef.current = active?.messages.length ?? 0
+  }, [active])
 
   async function refreshConversations(currentUser = user) {
     if (!currentUser) return
     const { conversations } = await api.conversations()
     const mapped = await Promise.all(conversations.map(async conversation => {
-      const { messages } = await api.messages(conversation.id)
-      return fromApiConversation(conversation, messages, currentUser)
+      const page = await api.messages(conversation.id)
+      return fromApiConversation(conversation, page, currentUser)
     }))
     setChats(mapped)
     setActiveId(current => mapped.some(chat => chat.id === current) ? current : mapped[0]?.id ?? '')
@@ -90,8 +109,8 @@ function App() {
       setUser(currentUser)
       const [{ conversations }, nextPeople] = await Promise.all([api.conversations(), api.friends()])
       const mapped = await Promise.all(conversations.map(async conversation => {
-        const { messages } = await api.messages(conversation.id)
-        return fromApiConversation(conversation, messages, currentUser)
+        const page = await api.messages(conversation.id)
+        return fromApiConversation(conversation, page, currentUser)
       }))
       if (mounted) { setChats(mapped); setActiveId(mapped[0]?.id ?? ''); setPeople(nextPeople) }
     }).catch(() => { void api.logout() }).finally(() => { if (mounted) setLoading(false) })
@@ -116,11 +135,13 @@ function App() {
     socket.on('message:new', (message: ApiMessage) => {
       const mapped = fromApiMessage(message, user)
       const found = chatsRef.current.some(chat => chat.id === message.conversationId)
+      const isOpen = message.conversationId === activeConversationId
       setChats(current => current.map(chat => {
         if (chat.id !== message.conversationId) return chat
         const alreadyLoaded = chat.messages.some(existing => existing.id === message.id)
-        return { ...chat, preview: message.text, time: mapped.time, messages: !alreadyLoaded && chat.id === activeConversationId ? [...chat.messages, mapped] : chat.messages }
+        return { ...chat, preview: message.text, time: mapped.time, unreadCount: message.authorId !== user.id && !isOpen ? chat.unreadCount + 1 : chat.unreadCount, messages: !alreadyLoaded && isOpen ? [...chat.messages, mapped] : chat.messages }
       }))
+      if (isOpen && message.authorId !== user.id) void api.markRead(message.conversationId).catch(() => undefined)
       if (!found) void refreshConversations(user).catch(() => undefined)
     })
     return () => { socket.emit('conversation:leave', activeConversationId); socket.disconnect() }
@@ -189,14 +210,33 @@ function App() {
     setNotice('')
     if (!user) return
     try {
-      const { messages } = await api.messages(id)
+      const page = await api.messages(id)
+      await api.markRead(id)
       setChats(current => current.map(chat => chat.id === id ? {
         ...chat,
-        messages: messages.map(message => fromApiMessage(message, user)),
-        preview: messages.at(-1)?.text ?? chat.preview,
-        time: messages.at(-1) ? localTime(messages.at(-1)!.createdAt) : chat.time,
+        messages: page.messages.map(message => fromApiMessage(message, user)),
+        olderCursor: page.nextCursor,
+        unreadCount: 0,
+        preview: page.messages.at(-1)?.text ?? chat.preview,
+        time: page.messages.at(-1) ? localTime(page.messages.at(-1)!.createdAt) : chat.time,
       } : chat))
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível abrir essa conversa.') }
+  }
+
+  async function loadOlderMessages() {
+    if (!active?.olderCursor || !user || loadingOlder) return
+    setLoadingOlder(true)
+    try {
+      const page = await api.messages(active.id, active.olderCursor)
+      const scroller = messageScrollRef.current
+      if (scroller) preserveScrollRef.current = { height: scroller.scrollHeight, top: scroller.scrollTop }
+      setChats(current => current.map(chat => chat.id === active.id ? {
+        ...chat,
+        olderCursor: page.nextCursor,
+        messages: [...page.messages.map(message => fromApiMessage(message, user)), ...chat.messages.filter(existing => !page.messages.some(message => message.id === existing.id))],
+      } : chat))
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível carregar o histórico.') }
+    finally { setLoadingOlder(false) }
   }
 
   if (loading) return <main className="auth-screen"><div className="auth-card"><span className="auth-brand">p</span><p>Conectando ao Prosa…</p></div></main>
@@ -221,7 +261,7 @@ function App() {
       <nav className="tabs" aria-label="Navegação">{[{ id: 'messages', label: 'Mensagens' }, { id: 'friends', label: 'Contatos' }].map(item => <button key={item.id} className={`tab ${activeView === item.id ? 'active' : ''}`} onClick={() => setActiveView(item.id as 'messages' | 'friends')}>{item.label}{item.id === 'friends' && people.incoming.length > 0 && <span className="tab-count">{people.incoming.length}</span>}</button>)}</nav>
       <div className="section-label"><span>{activeView === 'friends' ? 'CONECTADOS' : 'RECENTES'}</span><button aria-label="Atualizar lista" onClick={() => void (activeView === 'friends' ? refreshPeople() : refreshConversations())}><Icon name="more" size={17} /></button></div>
       <div className="conversation-list">{activeView === 'messages' ? filtered.map(chat => <button key={chat.id} className={`conversation ${activeId === chat.id ? 'active' : ''}`} onClick={() => void openConversation(chat.id)}>
-        <span className={`avatar ${chat.color}`}>{chat.initials}{chat.online && <i />}</span><span className="conversation-copy"><span className="conversation-top"><strong>{chat.name}</strong><time>{chat.time}</time></span><span className="conversation-bottom"><span>{chat.preview}</span>{chat.unread && <i className="unread-dot" />}</span></span>
+        <span className={`avatar ${chat.color}`}>{chat.initials}{chat.online && <i />}</span><span className="conversation-copy"><span className="conversation-top"><strong>{chat.name}</strong><time>{chat.time}</time></span><span className="conversation-bottom"><span>{chat.preview}</span>{chat.unreadCount > 0 && <i className="unread-dot" title={`${chat.unreadCount} mensagens não lidas`} />}</span></span>
       </button>) : people.friends.filter(person => `${person.displayName} ${person.username}`.toLowerCase().includes(query.toLowerCase())).map(person => <button key={person.id} className={`conversation ${activeId === chats.find(chat => chat.handle === `@${person.username}`)?.id ? 'active' : ''}`} onClick={() => { const conversation = chats.find(chat => chat.handle === `@${person.username}`); if (conversation) void openConversation(conversation.id) }}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><span className="conversation-copy"><span className="conversation-top"><strong>{person.displayName}</strong></span><span className="conversation-bottom"><span>@{person.username}</span></span></span></button>)}</div>
       <div className="sidebar-bottom"><div className="sync-mark"><span /> Sessão ativa · @{user.username}</div></div>
     </aside>
@@ -229,7 +269,7 @@ function App() {
     <section className="chat-panel">
       {activeView === 'friends' ? <div className="contacts-panel"><header className="chat-header"><div><p className="eyebrow">SUA REDE</p><h2>Contatos</h2></div><button className="auth-submit contact-add" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Adicionar pessoa</button></header><div className="contacts-content">{people.incoming.length > 0 && <section className="people-section"><h3>Pedidos recebidos <span>{people.incoming.length}</span></h3>{people.incoming.map(person => <article className="person-row" key={person.id}><span className="avatar violet">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username}</span></div><button className="person-action primary" onClick={() => void acceptRequest(person)}>Aceitar</button><button className="person-action" onClick={() => void dismissRequest(person.id)}>Remover</button></article>)}</section>}{people.outgoing.length > 0 && <section className="people-section"><h3>Pedidos enviados</h3>{people.outgoing.map(person => <article className="person-row" key={person.id}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username} · aguardando resposta</span></div><button className="person-action" onClick={() => void dismissRequest(person.id)}>Cancelar</button></article>)}</section>}<section className="people-section"><h3>Conectados <span>{people.friends.length}</span></h3>{people.friends.length ? people.friends.map(person => <article className="person-row" key={person.id}><span className="avatar green">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}<i /></span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username}</span></div><button className="person-action primary" onClick={() => { const conversation = chats.find(chat => chat.handle === `@${person.username}`); if (conversation) { setActiveView('messages'); setActiveId(conversation.id) } }}>Mensagem</button><button className="person-action" onClick={() => void removeConnection(person)}>Remover</button></article>) : <p className="empty-people">Seus contatos aparecerão aqui quando aceitarem um pedido.</p>}</section></div></div> : active ? <>
       <header className="chat-header"><div className="chat-person"><span className={`avatar small ${active.color}`}>{active.initials}{active.online && <i />}</span><div><h2>{active.name}</h2><p>{active.handle === `@${user.username}` ? 'Conversa pessoal' : 'Conversa direta'}</p></div></div><div className="header-actions"><button className="icon-button" aria-label="Chamada de voz" onClick={() => setNotice('Chamadas estarão disponíveis quando a conexão em tempo real for configurada.')}><Icon name="phone" /></button><button className="icon-button" aria-label="Chamada de vídeo" onClick={() => setNotice('Chamadas estarão disponíveis quando a conexão em tempo real for configurada.')}><Icon name="video" /></button><span className="action-divider" /><button className="icon-button" aria-label="Mais opções" onClick={() => setNotice('Mais opções de conversa em breve.')}><Icon name="more" /></button></div></header>
-      <div className="message-scroll"><div className="day-divider"><span>HISTÓRICO</span></div><div className="messages">{active.messages.map((message, index) => {
+      <div className="message-scroll" ref={messageScrollRef} onScroll={event => { const element = event.currentTarget; nearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}><div className="day-divider"><span>HISTÓRICO</span></div>{active.olderCursor && <button className="load-older" disabled={loadingOlder} onClick={() => void loadOlderMessages()}>{loadingOlder ? 'Carregando…' : 'Carregar mensagens anteriores'}</button>}<div className="messages">{active.messages.map((message, index) => {
         const previous = active.messages[index - 1]
         const grouped = previous?.author === message.author
         return <article key={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}<p>{message.text}</p></div></article>

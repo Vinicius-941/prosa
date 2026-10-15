@@ -53,6 +53,13 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS messages_conversation_created ON messages(conversation_id, created_at);
+  CREATE TABLE IF NOT EXISTS conversation_reads (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    last_read_rowid INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (conversation_id, user_id)
+  );
 `)
 const conversationColumns = db.pragma('table_info(conversations)') as { name: string }[]
 if (!conversationColumns.some(column => column.name === 'kind')) {
@@ -274,6 +281,9 @@ app.get('/api/conversations', requireAuth, (req: AuthRequest, res) => {
       WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) AS peerUsername,
     (SELECT m.body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview,
     (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS lastMessageAt
+    ,(SELECT COUNT(*) FROM messages unread WHERE unread.conversation_id = c.id AND unread.author_id <> @me
+      AND unread.rowid > COALESCE((SELECT cr.last_read_rowid FROM conversation_reads cr
+        WHERE cr.conversation_id = c.id AND cr.user_id = @me), 0)) AS unreadCount
     FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
     WHERE cm.user_id = @me AND (c.kind <> 'direct' OR EXISTS (
       SELECT 1 FROM conversation_members peer JOIN friendships f ON f.status = 'accepted'
@@ -285,11 +295,50 @@ app.get('/api/conversations', requireAuth, (req: AuthRequest, res) => {
 
 app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) => {
   if (!canAccessConversation(req.params.id, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
-  const messages = db.prepare(`SELECT m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-    u.display_name AS author, m.body AS text, m.created_at AS createdAt
-    FROM messages m JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ?
-    ORDER BY m.created_at ASC, m.rowid ASC LIMIT 500`).all(req.params.id)
-  return res.json({ messages })
+  const parsedLimit = Number(req.query.limit ?? 50)
+  const limit = Number.isInteger(parsedLimit) ? Math.min(100, Math.max(1, parsedLimit)) : 50
+  let before: { createdAt: string; rowid: number } | undefined
+  if (req.query.before !== undefined) {
+    const cursor = String(req.query.before)
+    if (cursor.length > 256 || !/^[A-Za-z0-9_-]+$/.test(cursor)) return res.status(400).json({ error: 'Cursor de histórico inválido.' })
+    try {
+      const value = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as { createdAt?: unknown; rowid?: unknown }
+      if (typeof value.createdAt !== 'string' || value.createdAt.length > 40 || !Number.isSafeInteger(value.rowid) || Number(value.rowid) < 1) {
+        return res.status(400).json({ error: 'Cursor de histórico inválido.' })
+      }
+      before = { createdAt: value.createdAt, rowid: Number(value.rowid) }
+    } catch { return res.status(400).json({ error: 'Cursor de histórico inválido.' }) }
+  }
+  const rows = before
+    ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt
+        FROM messages m JOIN users u ON u.id = m.author_id
+        WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < ?))
+        ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, before.createdAt, before.createdAt, before.rowid, limit + 1) as (ApiMessageRow & { sequence: number })[]
+    : db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt
+        FROM messages m JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ?
+        ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, limit + 1) as (ApiMessageRow & { sequence: number })[]
+  const hasOlder = rows.length > limit
+  const page = rows.slice(0, limit)
+  const oldest = page.at(-1)
+  const nextCursor = hasOlder && oldest
+    ? Buffer.from(JSON.stringify({ createdAt: oldest.createdAt, rowid: oldest.sequence })).toString('base64url')
+    : null
+  const messages = page.reverse().map(({ sequence: _sequence, ...message }) => message)
+  return res.json({ messages, nextCursor })
+})
+
+type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string }
+
+app.post('/api/conversations/:id/read', requireAuth, (req: AuthRequest, res) => {
+  if (!canAccessConversation(req.params.id, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
+  const latest = db.prepare('SELECT COALESCE(MAX(rowid), 0) AS rowid FROM messages WHERE conversation_id = ?').get(req.params.id) as { rowid: number }
+  db.prepare(`INSERT INTO conversation_reads (conversation_id, user_id, last_read_rowid)
+    VALUES (?, ?, ?) ON CONFLICT(conversation_id, user_id) DO UPDATE SET
+    last_read_rowid = MAX(conversation_reads.last_read_rowid, excluded.last_read_rowid), updated_at = CURRENT_TIMESTAMP`)
+    .run(req.params.id, req.user!.id, latest.rowid)
+  return res.json({ lastReadRowId: latest.rowid })
 })
 
 app.post('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) => {

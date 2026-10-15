@@ -60,9 +60,26 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   assert.equal(accepted.status, 'accepted')
 
   const aliceConversations = await request<{ conversations: { id: string }[] }>('/conversations', alice.token)
-  const brunoConversations = await request<{ conversations: { id: string }[] }>('/conversations', bruno.token)
+  const brunoConversations = await request<{ conversations: { id: string; unreadCount: number }[] }>('/conversations', bruno.token)
   assert.ok(aliceConversations.conversations.some(item => item.id === accepted.conversationId))
   assert.ok(brunoConversations.conversations.some(item => item.id === accepted.conversationId))
+  for (let index = 1; index <= 55; index++) {
+    await request(`/conversations/${accepted.conversationId}/messages`, alice.token, {
+      method: 'POST', body: JSON.stringify({ text: `Histórico ${index}` }),
+    })
+  }
+  const unread = await request<{ conversations: { id: string; unreadCount: number }[] }>('/conversations', bruno.token)
+  assert.equal(unread.conversations.find(item => item.id === accepted.conversationId)?.unreadCount, 55)
+  const firstPage = await request<{ messages: { text: string }[]; nextCursor: string | null }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+  assert.equal(firstPage.messages.length, 50)
+  assert.ok(firstPage.nextCursor)
+  const secondPage = await request<{ messages: { text: string }[]; nextCursor: string | null }>(`/conversations/${accepted.conversationId}/messages?before=${encodeURIComponent(firstPage.nextCursor!)}`, bruno.token)
+  assert.equal(secondPage.messages.length, 5)
+  assert.equal(secondPage.nextCursor, null)
+  assert.deepEqual([...secondPage.messages, ...firstPage.messages].map(item => item.text), Array.from({ length: 55 }, (_, index) => `Histórico ${index + 1}`))
+  await request(`/conversations/${accepted.conversationId}/read`, bruno.token, { method: 'POST' })
+  const read = await request<{ conversations: { id: string; unreadCount: number }[] }>('/conversations', bruno.token)
+  assert.equal(read.conversations.find(item => item.id === accepted.conversationId)?.unreadCount, 0)
 
   const brunoSocket = connectSocket(origin, { auth: { token: bruno.token }, reconnection: false })
   try {
