@@ -47,7 +47,8 @@
       "target": [
         "nsis"
       ],
-      "artifactName": "Prosa-Setup-${version}.${ext}"
+      "artifactName": "Prosa-Setup-${version}.${ext}",
+      "icon": "build-assets/prosa.ico"
     },
     "nsis": {
       "oneClick": false,
@@ -63,7 +64,8 @@
         "deb"
       ],
       "artifactName": "Prosa-${version}-${arch}.${ext}",
-      "synopsis": "Conversas que aproximam"
+      "synopsis": "Conversas que aproximam",
+      "icon": "build-assets/prosa.png"
     }
   },
   "dependencies": {

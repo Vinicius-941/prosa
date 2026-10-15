@@ -63,7 +63,7 @@ jobs:
           retention-days: 7
 
   publish:
-    needs: package
+    needs: [package, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -78,4 +78,5 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           gh release view "$TAG_NAME" --repo "$GH_REPO" >/dev/null 2>&1 || gh release create "$TAG_NAME" --repo "$GH_REPO" --generate-notes
-          gh release upload "$TAG_NAME" release-files/* --clobber --repo "$GH_REPO"
+          mapfile -d '' asset_files < <(find release-files -maxdepth 1 -type f -print0)
+          gh release upload "$TAG_NAME" "${asset_files[@]}" --clobber --repo "$GH_REPO"
