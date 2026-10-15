@@ -247,6 +247,13 @@ function canAccessConversation(conversationId: string, userId: string) {
     WHERE peer.conversation_id = ? AND peer.user_id <> ? LIMIT 1`).get(userId, userId, conversationId, userId))
 }
 
+async function evictUsersFromConversation(conversationId: string, userIds: string[]) {
+  for (const userId of userIds) {
+    const sockets = await io.in(`user:${userId}`).fetchSockets()
+    for (const socket of sockets) await socket.leave(`conversation:${conversationId}`)
+  }
+}
+
 app.get('/api/health', (_req, res) => {
   try {
     db.prepare('SELECT 1').get()
@@ -537,16 +544,18 @@ app.patch('/api/communities/:id', requireAuth, (req: AuthRequest, res) => {
   return res.json({ id: req.params.id, name })
 })
 
-app.delete('/api/communities/:id', requireAuth, (req: AuthRequest, res) => {
+app.delete('/api/communities/:id', requireAuth, async (req: AuthRequest, res) => {
   const community = db.prepare('SELECT owner_id AS ownerId FROM communities WHERE id = ?').get(req.params.id) as { ownerId: string } | undefined
   if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' })
   if (community.ownerId !== req.user!.id) return res.status(403).json({ error: 'Somente o responsável pode excluir a comunidade.' })
   const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(req.params.id) as { userId: string }[]
+  const channels = db.prepare('SELECT conversation_id AS conversationId FROM community_channels WHERE community_id = ?').all(req.params.id) as { conversationId: string }[]
   const removeCommunity = db.transaction(() => {
     db.prepare('DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM community_channels WHERE community_id = ?)').run(req.params.id)
     db.prepare('DELETE FROM communities WHERE id = ?').run(req.params.id)
   })
   removeCommunity()
+  for (const channel of channels) await evictUsersFromConversation(channel.conversationId, members.map(member => member.userId))
   for (const member of members) {
     io.to(`user:${member.userId}`).emit('communities:changed')
     io.to(`user:${member.userId}`).emit('conversations:changed')
@@ -578,7 +587,7 @@ app.put('/api/communities/:id/members/:userId/role', requireAuth, (req: AuthRequ
   return res.json({ communityId: id, userId, role })
 })
 
-app.delete('/api/communities/:id/members/:userId', requireAuth, (req: AuthRequest, res) => {
+app.delete('/api/communities/:id/members/:userId', requireAuth, async (req: AuthRequest, res) => {
   const { id, userId } = req.params
   const community = db.prepare('SELECT owner_id AS ownerId FROM communities WHERE id = ?').get(id) as { ownerId: string } | undefined
   if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' })
@@ -595,6 +604,8 @@ app.delete('/api/communities/:id/members/:userId', requireAuth, (req: AuthReques
     db.prepare('DELETE FROM conversation_members WHERE user_id = ? AND conversation_id IN (SELECT conversation_id FROM community_channels WHERE community_id = ?)').run(userId, id)
   })
   removeMember()
+  const channels = db.prepare('SELECT conversation_id AS conversationId FROM community_channels WHERE community_id = ?').all(id) as { conversationId: string }[]
+  for (const channel of channels) await evictUsersFromConversation(channel.conversationId, [userId])
   const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(id) as { userId: string }[]
   for (const member of [...members, { userId }]) {
     io.to(`user:${member.userId}`).emit('communities:changed')
@@ -693,12 +704,16 @@ app.delete('/api/friend-requests/:id', requireAuth, (req: AuthRequest, res) => {
   return res.status(204).end()
 })
 
-app.delete('/api/friends/:id', requireAuth, (req: AuthRequest, res) => {
+app.delete('/api/friends/:id', requireAuth, async (req: AuthRequest, res) => {
+  const directConversation = db.prepare(`SELECT c.id FROM conversations c JOIN conversation_members a ON a.conversation_id = c.id
+    JOIN conversation_members b ON b.conversation_id = c.id WHERE c.kind = 'direct'
+    AND a.user_id = ? AND b.user_id = ?`).get(req.user!.id, req.params.id) as { id: string } | undefined
   const other = db.prepare("SELECT CASE WHEN requester_id = ? THEN addressee_id ELSE requester_id END AS id FROM friendships WHERE status = 'accepted' AND ((requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?))")
     .get(req.user!.id, req.user!.id, req.params.id, req.params.id, req.user!.id) as { id: string } | undefined
   const result = db.prepare("DELETE FROM friendships WHERE status = 'accepted' AND ((requester_id = ? AND addressee_id = ?) OR (requester_id = ? AND addressee_id = ?))")
     .run(req.user!.id, req.params.id, req.params.id, req.user!.id)
   if (!result.changes) return res.status(404).json({ error: 'Essa conexão não existe.' })
+  if (directConversation) await evictUsersFromConversation(directConversation.id, [req.user!.id, req.params.id])
   io.to(`user:${req.user!.id}`).emit('conversations:changed')
   if (other) io.to(`user:${other.id}`).emit('conversations:changed')
   io.to(`user:${req.user!.id}`).emit('contacts:changed')

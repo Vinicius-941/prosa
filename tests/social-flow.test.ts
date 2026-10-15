@@ -399,6 +399,22 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     })
     assert.equal(deniedJoin.ok, false)
 
+    await request<void>(`/communities/${newCommunity.community.id}/members/${bruno.user.id}`, alice.token, { method: 'DELETE' })
+    let receivedRevokedChannelEvent = false
+    const revokedChannelListener = () => { receivedRevokedChannelEvent = true }
+    brunoSocket.on('message:reaction', revokedChannelListener)
+    const communityMessageHistory = await request<{ messages: { id: string }[] }>(`/conversations/${generalChannel.conversationId}/messages`, alice.token)
+    const communityMessageId = communityMessageHistory.messages[0].id
+    await request(`/conversations/${generalChannel.conversationId}/messages/${communityMessageId}/reactions`, alice.token, { method: 'PUT', body: JSON.stringify({ emoji: '👏' }) })
+    await new Promise(resolve => setTimeout(resolve, 50))
+    brunoSocket.off('message:reaction', revokedChannelListener)
+    assert.equal(receivedRevokedChannelEvent, false)
+    const evictedJoin = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
+    assert.equal(evictedJoin.ok, false)
+    await request<{ communityId: string }>('/communities/join', bruno.token, { method: 'POST', body: JSON.stringify({ inviteCode: rotatedInvite.inviteCode }) })
+    const rejoinedRoom = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
+    assert.equal(rejoinedRoom.ok, true)
+
     await request<void>(`/friends/${bruno.user.id}`, alice.token, { method: 'DELETE' })
     const revokedJoin = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', accepted.conversationId, resolve))
     assert.equal(revokedJoin.ok, false)
