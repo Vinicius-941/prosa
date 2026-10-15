@@ -24,7 +24,7 @@ const allowedOrigins = configuredOrigins?.length ? configuredOrigins : ['http://
 const dataDir = path.resolve(process.env.PROSA_DATA_DIR ?? 'data')
 mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'prosa.sqlite'))
-const activeCalls = new Map<string, { conversationId: string; participants: Set<string>; initiatorId: string }>()
+const activeCalls = new Map<string, { conversationId: string; participants: Set<string>; initiatorId: string; phase: 'ringing' | 'connecting' | 'active'; createdAt: number }>()
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
 db.exec(`
@@ -203,19 +203,27 @@ io.on('connection', socket => {
       WHERE c.id = ?`).get(user.id, user.id, conversationId) as { kind: string; peerUserId: string } | undefined
     if (!direct || direct.kind !== 'direct') return acknowledge?.({ ok: false, error: 'Chamadas estão disponíveis apenas em conversas diretas.' })
     if (type === 'invite' && payload !== undefined) return acknowledge?.({ ok: false, error: 'Convite de chamada inválido.' })
+    for (const [staleId, staleCall] of activeCalls) if (Date.now() - staleCall.createdAt > 5 * 60_000) activeCalls.delete(staleId)
     if (type !== 'invite' && !activeCalls.has(callId)) return acknowledge?.({ ok: false, error: 'Essa chamada não está mais ativa.' })
     if (type === 'invite') {
-      if ([...activeCalls.values()].some(call => call.conversationId === conversationId)) return acknowledge?.({ ok: false, error: 'Já existe uma chamada nesta conversa.' })
-      activeCalls.set(callId, { conversationId, participants: new Set([user.id, direct.peerUserId]), initiatorId: user.id })
+      if ([...activeCalls.values()].some(call => call.participants.has(user.id) || call.participants.has(direct.peerUserId))) return acknowledge?.({ ok: false, error: 'Uma das pessoas já está em outra chamada.' })
+      activeCalls.set(callId, { conversationId, participants: new Set([user.id, direct.peerUserId]), initiatorId: user.id, phase: 'ringing', createdAt: Date.now() })
       if (activeCalls.size > 1_000) activeCalls.delete(activeCalls.keys().next().value!)
     } else {
       const active = activeCalls.get(callId)
       if (!active || active.conversationId !== conversationId || !active.participants.has(user.id) ||
         (active.initiatorId === user.id && ['accept', 'decline', 'busy', 'answer'].includes(type)) ||
-        (active.initiatorId !== user.id && ['offer', 'answer'].includes(type))) {
+        (active.initiatorId !== user.id && ['offer', 'candidate'].includes(type)) ||
+        (['accept', 'decline', 'busy'].includes(type) && active.phase !== 'ringing') ||
+        (type === 'offer' && active.phase !== 'connecting') ||
+        (type === 'answer' && active.phase !== 'connecting') ||
+        (type === 'candidate' && !['connecting', 'active'].includes(active.phase))) {
         return acknowledge?.({ ok: false, error: 'Sinal não permitido para esta chamada.' })
       }
-      if (['hangup', 'decline', 'busy'].includes(type)) activeCalls.delete(callId)
+      if (['decline', 'busy'].includes(type)) activeCalls.delete(callId)
+      if (type === 'accept') active.phase = 'connecting'
+      if (type === 'answer') active.phase = 'active'
+      if (type === 'hangup') activeCalls.delete(callId)
     }
     if (payload !== undefined && Buffer.byteLength(JSON.stringify(payload), 'utf8') > 24_000) {
       if (type === 'invite') activeCalls.delete(callId)
