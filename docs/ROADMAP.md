@@ -22,7 +22,7 @@ A feature is marked implemented only when the behavior exists in the application
 | Android client | Not implemented | Design and implement an adapted mobile experience |
 | Security and privacy review | In progress | Baseline password hashing, rate-limited auth endpoints, security headers, input limits; comprehensive threat model, transport deployment, data controls and independent review remain |
 | Performance benchmarks | Not implemented | Define reproducible workloads and measure actual desktop, server, and mobile builds |
-| CI checks | Implemented (workflow awaiting remote run) | `.github/workflows/ci.yml` runs integration checks, lint, and client builds on Windows and Linux |
+| CI checks | Implemented and passing | `.github/workflows/ci.yml` runs integration checks, lint, and client builds; GitHub Actions passed on Windows Server 2022 and Ubuntu for commit `dd8e9ea` |
 | Release artifacts | Not implemented | Add signed installers, checksums, and release instructions |
 
 ## Milestones
