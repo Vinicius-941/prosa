@@ -15,7 +15,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-2022]
+        include:
+          - os: ubuntu-latest
+            package: linux
+          - os: windows-2022
+            package: win
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -27,3 +31,5 @@ jobs:
       - run: npm test
       - run: npm run lint
       - run: npm run build
+      - run: npm run build:service
+      - run: npx electron-builder --dir --${{ matrix.package }} --publish never

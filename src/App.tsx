@@ -125,7 +125,7 @@ function App() {
 
   useEffect(() => {
     if (!user || !activeConversationId) return
-    const socketOrigin = import.meta.env.VITE_API_URL?.replace(/\/api\/?$/, '') || undefined
+    const socketOrigin = (window.prosaDesktop?.apiUrl ?? import.meta.env.VITE_API_URL)?.replace(/\/api\/?$/, '') || undefined
     const socket = io(socketOrigin, { auth: { token: api.sessionToken() }, reconnection: true, reconnectionDelayMax: 5000 })
     socket.on('connect', () => socket.emit('conversation:join', activeConversationId, (result: { ok: boolean }) => {
       if (!result.ok) setNotice('Esta conversa não está mais disponível.')

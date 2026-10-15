@@ -1,16 +1,63 @@
 {
   "name": "prosa",
+  "productName": "Prosa",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Um aplicativo de comunicação para conversas diretas e comunidades.",
+  "author": "Prosa contributors",
   "type": "module",
+  "main": "desktop/main.cjs",
   "scripts": {
     "dev": "concurrently -k \"npm:api:dev\" \"vite\"",
     "api:dev": "tsx watch server/index.ts",
     "api:start": "tsx server/index.ts",
     "test": "tsx --test tests/social-flow.test.ts",
     "build": "tsc -b && vite build",
+    "build:service": "esbuild server/index.ts --bundle --platform=node --format=cjs --target=node22 --external:argon2 --external:better-sqlite3 --external:dotenv --outfile=dist-server/index.cjs",
+    "build:desktop": "npm run build && npm run build:service",
+    "desktop:dev": "npm run build:desktop && electron .",
+    "package:desktop": "npm run build:desktop && electron-builder --dir",
     "lint": "oxlint",
     "preview": "vite preview"
+  },
+  "build": {
+    "appId": "app.prosa.desktop",
+    "productName": "Prosa",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/argon2/**",
+      "node_modules/better-sqlite3/**"
+    ],
+    "files": [
+      "desktop/**",
+      "dist/**",
+      "dist-server/**",
+      "package.json"
+    ],
+    "directories": {
+      "output": "artifacts"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ],
+      "artifactName": "Prosa-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "category": "Network;InstantMessaging",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "artifactName": "Prosa-${version}-${arch}.${ext}",
+      "synopsis": "Conversas que aproximam"
+    }
   },
   "dependencies": {
     "argon2": "^0.45.1",
@@ -34,6 +81,9 @@
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "concurrently": "^9.2.5",
+    "electron": "^44.7.2",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.27.7",
     "node-gyp": "^13.1.0",
     "oxlint": "^1.81.0",
     "tsx": "^4.23.15",

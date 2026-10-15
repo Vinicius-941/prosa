@@ -12,6 +12,7 @@ import helmet from 'helmet'
 import { Server } from 'socket.io'
 
 const port = Number(process.env.PORT ?? 8787)
+const host = process.env.HOST ?? '127.0.0.1'
 const dataDir = path.resolve(process.env.PROSA_DATA_DIR ?? 'data')
 mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'prosa.sqlite'))
@@ -359,6 +360,10 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: 'O serviço encontrou um erro inesperado.' })
 })
 
-if (process.env.PROSA_NO_LISTEN !== '1') httpServer.listen(port, () => console.log(`Prosa API listening on http://localhost:${port}`))
+if (process.env.PROSA_NO_LISTEN !== '1') httpServer.listen(port, host, () => {
+  const address = httpServer.address()
+  const activePort = address && typeof address !== 'string' ? address.port : port
+  console.log(`Prosa API listening on http://${host}:${activePort}`)
+})
 
 export { app, db, httpServer, io }

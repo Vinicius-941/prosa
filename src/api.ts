@@ -7,7 +7,7 @@ export type ApiFriendData = { friends: ApiPerson[]; incoming: ApiPerson[]; outgo
 type AuthResult = { token: string; user: ProsaUser }
 
 const tokenKey = 'prosa.session'
-const base = import.meta.env.VITE_API_URL ?? '/api'
+const base = window.prosaDesktop?.apiUrl ?? import.meta.env.VITE_API_URL ?? '/api'
 
 function sessionToken() { return localStorage.getItem(tokenKey) }
 

@@ -18,20 +18,21 @@ A feature is marked implemented only when the behavior exists in the application
 | Communities, channels, roles, moderation | Not implemented | Data model and server-side authorization required |
 | Attachments and media storage | Not implemented | Safe upload validation, limits, scanning policy, and object storage required |
 | Voice, video, and screen sharing | Not implemented | Evaluate WebRTC/SFU architecture and platform support |
-| Desktop installers | Not implemented | Select packaging/runtime and validate signed Windows build |
-| Linux packages | Not implemented | Add Linux CI builds and validate artifacts |
+| Desktop app shell | Implemented (early) | Electron starts the local API, binds it to loopback, and keeps account data in the user's application-data folder; verify packaged app launch and upgrades |
+| Windows installers | Implemented (early) | NSIS installer build is wired into Windows CI and tagged releases; signing and clean-machine install/upgrade checks remain |
+| Linux packages | Implemented (early) | AppImage and Debian targets are wired into Linux tagged releases; clean-machine launch and upgrade checks remain |
 | Android client | Not implemented | Design and implement an adapted mobile experience |
 | Security and privacy review | In progress | Baseline password hashing, rate-limited auth endpoints, security headers, input limits; comprehensive threat model, transport deployment, data controls and independent review remain |
 | Performance benchmarks | Not implemented | Define reproducible workloads and measure actual desktop, server, and mobile builds |
-| CI checks | Implemented and passing | `.github/workflows/ci.yml` runs integration checks, lint, and client builds; GitHub Actions passed on Windows Server 2022 and Ubuntu for commit `dd8e9ea` |
-| Release artifacts | Not implemented | Add signed installers, checksums, and release instructions |
+| CI checks | Implemented | `.github/workflows/ci.yml` runs integration checks, lint, client/service builds, and unpacked desktop packaging on Windows and Linux |
+| Release artifacts | Implemented (early) | `.github/workflows/release.yml` packages Windows NSIS, Linux AppImage, and Debian assets for version tags; signing, checksums, provenance, and a first end-to-end release remain |
 
 ## Milestones
 
 1. Client foundation, accounts, connections, and local real-time messaging. **In progress.**
 2. Multi-account identity hardening, message operations, and deployment-ready storage.
 3. Communities, files, and moderation.
-4. Voice/video and adapted desktop, Linux, and Android clients.
+4. Voice/video and adapted Android client; validate desktop and Linux packages.
 5. Security review, automated platform builds, benchmarks, and release process.
 
-The local SQLite service is for development and is not configured for production hosting. Current scope and limitations must remain visible in user-facing documentation.
+The SQLite service remains local to each desktop installation and is not configured for multi-device or public hosting. Current scope and limitations must remain visible in user-facing documentation.

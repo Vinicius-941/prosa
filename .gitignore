@@ -9,6 +9,9 @@ lerna-debug.log*
 
 node_modules
 dist
+dist-server
+artifacts
+desktop-artifacts
 dist-ssr
 *.local
 data/
