@@ -227,6 +227,12 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     const removed = removedHistory.messages.find(message => message.id === sent.message.id)
     assert.equal(removed?.text, '')
     assert.ok(removed?.deletedAt)
+    const removedSearch = await request<{ messages: { id: string }[] }>('/messages/search?q=Mensagem%20atualizada', bruno.token)
+    assert.ok(!removedSearch.messages.some(message => message.id === sent.message.id))
+    const repeatedRemoval = await fetch(`${origin}/api/conversations/${accepted.conversationId}/messages/${sent.message.id}`, {
+      method: 'DELETE', headers: { authorization: `Bearer ${alice.token}` },
+    })
+    assert.equal(repeatedRemoval.status, 409)
 
     const deniedJoin = await new Promise<{ ok: boolean }>((resolve, reject) => {
       const carlaSocket = connectSocket(origin, { auth: { token: carla.token }, reconnection: false })

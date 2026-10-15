@@ -645,8 +645,7 @@ app.patch('/api/conversations/:conversationId/messages/:messageId', requireAuth,
 
 app.delete('/api/conversations/:conversationId/messages/:messageId', requireAuth, (req: AuthRequest, res) => {
   const { conversationId, messageId } = req.params
-  const isMember = db.prepare('SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ?').get(conversationId, req.user!.id)
-  if (!isMember) return res.status(404).json({ error: 'Conversa não encontrada.' })
+  if (!canAccessConversation(conversationId, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
   const message = db.prepare('SELECT id, author_id AS authorId, deleted_at AS deletedAt FROM messages WHERE id = ? AND conversation_id = ?')
     .get(messageId, conversationId) as { id: string; authorId: string; deletedAt: string | null } | undefined
   if (!message) return res.status(404).json({ error: 'Mensagem não encontrada.' })
