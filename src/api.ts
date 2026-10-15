@@ -5,6 +5,7 @@ export type ApiMessageSearchResult = ApiMessage & { conversationName: string }
 export type ApiCommunityChannel = { id: string; conversationId: string; name: string; position?: number }
 export type ApiCommunity = { id: string; name: string; inviteCode: string | null; role: 'owner' | 'admin' | 'member'; memberCount: number; channels: ApiCommunityChannel[] }
 export type ApiMessagePage = { messages: ApiMessage[]; nextCursor: string | null }
+export type ApiSession = { id: string; label: string; createdAt: number; lastSeenAt: number; expiresAt: number; current: number }
 export type ApiPerson = { id: string; userId?: string; username: string; displayName: string; relationship?: 'none' | 'incoming' | 'outgoing' | 'friend' }
 export type ApiFriendData = { friends: ApiPerson[]; incoming: ApiPerson[]; outgoing: ApiPerson[] }
 type AuthResult = { token: string; user: ProsaUser }
@@ -40,6 +41,8 @@ export const api = {
     return result.user
   },
   me: () => request<{ user: ProsaUser }>('/me'),
+  sessions: () => request<{ sessions: ApiSession[] }>('/sessions'),
+  revokeSession: (id: string) => request<void>(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   logout: async () => { try { await request('/auth/logout', { method: 'POST' }) } finally { localStorage.removeItem(tokenKey) } },
   conversations: () => request<{ conversations: ApiConversation[] }>('/conversations'),
   communities: () => request<{ communities: ApiCommunity[] }>('/communities'),

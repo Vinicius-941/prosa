@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
@@ -10,6 +11,11 @@ process.env.PROSA_NO_LISTEN = '1'
 process.env.PROSA_DATA_DIR = mkdtempSync(path.join(tmpdir(), 'prosa-social-'))
 const legacyDb = new Database(path.join(process.env.PROSA_DATA_DIR, 'prosa.sqlite'))
 legacyDb.exec("CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+legacyDb.exec("CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+legacyDb.exec("CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)")
+const legacyToken = 'legacy-existing-session-token-012345678901'
+legacyDb.prepare('INSERT INTO users (id, username, display_name, password_hash) VALUES (?, ?, ?, ?)').run('legacy-user', 'legacy_user', 'Usuário anterior', 'unused')
+legacyDb.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(createHash('sha256').update(legacyToken).digest('hex'), 'legacy-user', Date.now() + 60_000)
 legacyDb.close()
 
 const { db, httpServer, io } = await import('../server/index.ts')
@@ -47,9 +53,29 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     })
   }
 
+  const migratedSessions = await request<{ sessions: { id: string; label: string }[] }>('/sessions', legacyToken)
+  assert.equal(migratedSessions.sessions.length, 1)
+  assert.match(migratedSessions.sessions[0].id, /^[a-f0-9]{32}$/)
   const alice = await register('alice', 'Alice Aurora')
   const bruno = await register('bruno', 'Bruno Bairro')
   const carla = await register('carla', 'Carla Costa')
+  const aliceSecondSession = await request<Account>('/auth/login', undefined, {
+    method: 'POST', headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit Chrome/130.0' },
+    body: JSON.stringify({ username: alice.user.username, password: 'SenhaDeIntegracao!2026' }),
+  })
+  const aliceSessions = await request<{ sessions: { id: string; label: string; current: number }[] }>('/sessions', alice.token)
+  assert.equal(aliceSessions.sessions.length, 2)
+  const currentAliceSession = aliceSessions.sessions.find(session => session.current)
+  assert.ok(currentAliceSession)
+  const otherAliceSession = aliceSessions.sessions.find(session => !session.current)
+  assert.ok(otherAliceSession)
+  assert.match(otherAliceSession.label, /Windows/)
+  const denySelfRevoke = await sendHttp(`/sessions/${currentAliceSession.id}`, alice.token, { method: 'DELETE' })
+  assert.equal(denySelfRevoke.status, 400)
+  await request<void>(`/sessions/${otherAliceSession.id}`, alice.token, { method: 'DELETE' })
+  const revokedAliceSession = await sendHttp('/me', aliceSecondSession.token)
+  assert.equal(revokedAliceSession.status, 401)
+  assert.equal((await request<{ sessions: { id: string; current: number }[] }>('/sessions', alice.token)).sessions.length, 1)
 
   const search = await request<{ users: { username: string }[] }>(`/users/search?q=${bruno.user.username}`, alice.token)
   assert.ok(search.users.some(person => person.username === bruno.user.username))

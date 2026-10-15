@@ -4,9 +4,9 @@ Prosa is an independent communication app focused on clear, welcoming conversati
 
 ## Current status
 
-The client supports account creation, sign-in, sign-out, user discovery, connection requests, direct conversations between connected accounts, authenticated message search, and persisted messages delivered over a live connection. The API stores accounts, sessions, connections, conversations, and messages in SQLite. Passwords use Argon2id and bearer session values are stored as SHA-256 digests.
+The client supports account creation, sign-in, per-device active-session listing and revocation, user discovery, connection requests, direct conversations between connected accounts, invite-based communities and text channels, authenticated message search, and persisted messages delivered over a live connection. The API stores accounts, sessions, connections, conversations, and messages in SQLite. Passwords use Argon2id and bearer session values are stored as SHA-256 digests.
 
-This is an early development foundation. Email verification, account recovery, multi-factor authentication, multi-device synchronization, attachments, moderation, voice/video, and Android are not implemented. Do not expose this local service to the public internet or use it for production accounts.
+This is an early development foundation. Email verification, account recovery, multi-factor authentication, shared multi-device synchronization, attachments, moderation, voice/video, and Android are not implemented. Do not expose this local service to the public internet or use it for production accounts.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed feature matrix and remaining work.
 

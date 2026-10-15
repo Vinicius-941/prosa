@@ -32,8 +32,9 @@ db.exec(`
     password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    expires_at INTEGER NOT NULL
+    id TEXT NOT NULL UNIQUE, token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    label TEXT NOT NULL DEFAULT 'Dispositivo', created_at INTEGER NOT NULL DEFAULT 0,
+    last_seen_at INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL
   );
   CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT NOT NULL,
@@ -70,6 +71,15 @@ db.exec(`
     PRIMARY KEY (conversation_id, user_id)
   );
 `)
+const sessionColumns = db.pragma('table_info(sessions)') as { name: string }[]
+if (!sessionColumns.some(column => column.name === 'id')) db.exec("ALTER TABLE sessions ADD COLUMN id TEXT NOT NULL DEFAULT ''")
+if (!sessionColumns.some(column => column.name === 'label')) db.exec("ALTER TABLE sessions ADD COLUMN label TEXT NOT NULL DEFAULT 'Dispositivo'")
+if (!sessionColumns.some(column => column.name === 'created_at')) db.exec('ALTER TABLE sessions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0')
+if (!sessionColumns.some(column => column.name === 'last_seen_at')) db.exec('ALTER TABLE sessions ADD COLUMN last_seen_at INTEGER NOT NULL DEFAULT 0')
+db.prepare("UPDATE sessions SET id = lower(hex(randomblob(16))) WHERE id = ''").run()
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS sessions_id ON sessions(id)')
+db.exec('CREATE INDEX IF NOT EXISTS sessions_user_expiry ON sessions(user_id, expires_at)')
+db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now())
 const conversationColumns = db.pragma('table_info(conversations)') as { name: string }[]
 if (!conversationColumns.some(column => column.name === 'kind')) {
   db.exec("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'personal'")
@@ -128,10 +138,10 @@ app.use('/api/messages/search', rateLimit({ windowMs: 60_000, limit: 60, standar
 app.use('/api/friend-requests', rateLimit({ windowMs: 60 * 60_000, limit: 40, standardHeaders: 'draft-8', legacyHeaders: false }))
 app.use('/api/communities/join', rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false }))
 
-const createSession = db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
+const createSession = db.prepare('INSERT INTO sessions (id, token_hash, user_id, label, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
 const sessionUser = db.prepare(`SELECT users.id, users.username, users.display_name AS displayName
   FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?`)
-type AuthRequest = Request & { user?: { id: string; username: string; displayName: string } }
+type AuthRequest = Request & { user?: { id: string; username: string; displayName: string }; sessionId?: string; tokenHash?: string }
 const httpServer = createServer(app)
 const io = new Server(httpServer, { cors: { origin: allowedOrigins }, maxHttpBufferSize: 32_000 })
 
@@ -164,16 +174,36 @@ io.on('connection', socket => {
 function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
   const token = req.header('authorization')?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1]
   if (!token) return res.status(401).json({ error: 'Entre na sua conta para continuar.' })
-  const user = sessionUser.get(createHash('sha256').update(token).digest('hex'), Date.now()) as AuthRequest['user'] | undefined
-  if (!user) return res.status(401).json({ error: 'Sua sessão expirou. Entre novamente.' })
+  const tokenHash = createHash('sha256').update(token).digest('hex')
+  const user = sessionUser.get(tokenHash, Date.now()) as AuthRequest['user'] | undefined
+  if (!user) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ? AND expires_at <= ?').run(tokenHash, Date.now())
+    return res.status(401).json({ error: 'Sua sessão expirou. Entre novamente.' })
+  }
+  const session = db.prepare('SELECT id, last_seen_at AS lastSeenAt FROM sessions WHERE token_hash = ?').get(tokenHash) as { id: string; lastSeenAt: number } | undefined
+  if (!session) {
+    db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash)
+    return res.status(401).json({ error: 'Sua sessão expirou. Entre novamente.' })
+  }
   req.user = user
+  req.sessionId = session.id
+  req.tokenHash = tokenHash
+  if (Date.now() - session.lastSeenAt > 60_000) db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(Date.now(), session.id)
   return next()
 }
 
-function newSession(userId: string) {
+function sessionLabel(userAgent: string | undefined) {
+  if (!userAgent) return 'Dispositivo desconhecido'
+  const platform = /Windows/i.test(userAgent) ? 'Windows' : /Android/i.test(userAgent) ? 'Android' : /iPhone|iPad|iOS/i.test(userAgent) ? 'iPhone ou iPad' : /Mac OS|Macintosh/i.test(userAgent) ? 'Mac' : /Linux/i.test(userAgent) ? 'Linux' : 'Dispositivo'
+  const browser = /Edg\//i.test(userAgent) ? 'Edge' : /Firefox\//i.test(userAgent) ? 'Firefox' : /Chrome\//i.test(userAgent) ? 'Chrome' : /Safari\//i.test(userAgent) ? 'Safari' : 'Prosa'
+  return `${browser} · ${platform}`
+}
+
+function newSession(userId: string, userAgent?: string) {
   const token = randomBytes(32).toString('base64url')
+  const now = Date.now()
   // Session credentials are stored only as SHA-256 digests.
-  createSession.run(createHash('sha256').update(token).digest('hex'), userId, Date.now() + 30 * 24 * 60 * 60_000)
+  createSession.run(randomBytes(16).toString('hex'), createHash('sha256').update(token).digest('hex'), userId, sessionLabel(userAgent), now, now, now + 30 * 24 * 60 * 60_000)
   return token
 }
 
@@ -214,7 +244,7 @@ app.post('/api/auth/register', async (req, res, next) => {
     const conversation = randomBytes(16).toString('hex')
     db.prepare('INSERT INTO conversations (id, title, color) VALUES (?, ?, ?)').run(conversation, displayName, 'coral')
     db.prepare('INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)').run(conversation, id)
-    const token = newSession(id)
+    const token = newSession(id, req.header('user-agent'))
     return res.status(201).json({ token, user: { id, username, displayName } })
   } catch (error) { return next(error) }
 })
@@ -225,14 +255,13 @@ app.post('/api/auth/login', async (req, res, next) => {
     const password = String(req.body?.password ?? '')
     const user = db.prepare('SELECT id, username, display_name AS displayName, password_hash AS passwordHash FROM users WHERE username = ?').get(username) as { id: string; username: string; displayName: string; passwordHash: string } | undefined
     if (!user || !await argon2.verify(user.passwordHash, password).catch(() => false)) return res.status(401).json({ error: 'Nome de usuário ou senha incorretos.' })
-    return res.json({ token: newSession(user.id), user: { id: user.id, username: user.username, displayName: user.displayName } })
+    return res.json({ token: newSession(user.id, req.header('user-agent')), user: { id: user.id, username: user.username, displayName: user.displayName } })
   } catch (error) { return next(error) }
 })
 
 app.post('/api/auth/logout', requireAuth, (req: AuthRequest, res) => {
-  const token = req.header('authorization')!.slice(7)
-  const tokenHash = createHash('sha256').update(token).digest('hex')
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash)
+  const tokenHash = req.tokenHash!
+  db.prepare('DELETE FROM sessions WHERE id = ? AND user_id = ?').run(req.sessionId, req.user!.id)
   void io.in(`user:${req.user!.id}`).fetchSockets().then(sockets => {
     for (const socket of sockets) if (socket.data.tokenHash === tokenHash) socket.disconnect(true)
   })
@@ -240,6 +269,27 @@ app.post('/api/auth/logout', requireAuth, (req: AuthRequest, res) => {
 })
 
 app.get('/api/me', requireAuth, (req: AuthRequest, res) => res.json({ user: req.user }))
+
+app.get('/api/sessions', requireAuth, (req: AuthRequest, res) => {
+  db.prepare('DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?').run(req.user!.id, Date.now())
+  const sessions = db.prepare(`SELECT id, label, created_at AS createdAt, last_seen_at AS lastSeenAt,
+    expires_at AS expiresAt, id = ? AS current FROM sessions WHERE user_id = ? AND expires_at > ?
+    ORDER BY current DESC, last_seen_at DESC`).all(req.sessionId, req.user!.id, Date.now())
+  return res.json({ sessions })
+})
+
+app.delete('/api/sessions/:id', requireAuth, (req: AuthRequest, res) => {
+  if (!/^[a-f0-9]{32}$/.test(req.params.id)) return res.status(400).json({ error: 'Sessão inválida.' })
+  if (req.params.id === req.sessionId) return res.status(400).json({ error: 'Use a opção de sair para encerrar esta sessão.' })
+  const target = db.prepare('SELECT token_hash AS tokenHash FROM sessions WHERE id = ? AND user_id = ?').get(req.params.id, req.user!.id) as { tokenHash: string } | undefined
+  if (!target) return res.status(404).json({ error: 'Essa sessão não está mais ativa.' })
+  const result = db.prepare('DELETE FROM sessions WHERE id = ? AND user_id = ?').run(req.params.id, req.user!.id)
+  if (!result.changes) return res.status(404).json({ error: 'Essa sessão não está mais ativa.' })
+  void io.in(`user:${req.user!.id}`).fetchSockets().then(sockets => {
+    for (const socket of sockets) if (socket.data.tokenHash === target.tokenHash) socket.disconnect(true)
+  })
+  return res.status(204).end()
+})
 
 app.get('/api/communities', requireAuth, (req: AuthRequest, res) => {
   const rows = db.prepare(`SELECT c.id, c.name, c.invite_code AS inviteCode, cm.role,
