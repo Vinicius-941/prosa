@@ -19,7 +19,7 @@ A feature is marked implemented only when the behavior exists in the application
 | Conversation search | Implemented (early) | Authenticated, rate-limited message search covers only conversations the account can still access; selecting a match opens its message context |
 | Communities and text channels | Implemented (early) | Invite-code entry and owner/admin invite rotation; owner, admin, and member roles; owner-managed admin promotion, community rename/deletion, member removal, participant exit, admin/member channel creation, and persisted channel messages; bans, timeouts, audit history, and granular channel permissions remain |
 | Attachments and media storage | Not implemented | Safe upload validation, limits, scanning policy, and object storage required |
-| Voice, video, and screen sharing | Not implemented | Evaluate WebRTC/SFU architecture and platform support |
+| Voice, video, and screen sharing | Implemented (early) | One-to-one WebRTC audio calls have authenticated live signaling, incoming/outgoing/decline/busy/end states, microphone permission, mute, and access-revocation cleanup. Uses a public STUN server; TURN, network/device validation, video, group calls, and screen sharing remain |
 | Desktop app shell | Implemented (early) | Electron starts the local API, binds it to loopback, and keeps account data in the user's application-data folder; verify packaged app launch and upgrades |
 | Windows installers | Implemented (early) | NSIS installer build is wired into Windows CI and tagged releases; signing and clean-machine install/upgrade checks remain |
 | Linux packages | Implemented (early) | AppImage and Debian targets are wired into Linux tagged releases; clean-machine launch and upgrade checks remain |
@@ -35,7 +35,7 @@ A feature is marked implemented only when the behavior exists in the application
 1. Client foundation, accounts, connections, and local real-time messaging. **In progress.**
 2. Multi-account identity hardening, message operations, and deployment-ready storage.
 3. Communities, files, and moderation.
-4. Voice/video and adapted Android client; validate desktop and Linux packages.
+4. Direct voice-call foundation and adapted Android client; video, group calls, and screen sharing remain; validate desktop and Linux packages.
 5. Security review, automated platform builds, benchmarks, and release process.
 
 The desktop SQLite service remains local to each installation. The repository includes a reproducible single-server deployment configuration, but no public hosting environment has been provisioned. Current scope and limitations must remain visible in user-facing documentation.

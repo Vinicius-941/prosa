@@ -235,6 +235,38 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(joined.ok, true)
     const joinedChannel = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
     assert.equal(joinedChannel.ok, true)
+    const aliceCallSocket = connectSocket(origin, { auth: { token: alice.token }, reconnection: false })
+    try {
+      await new Promise<void>((resolve, reject) => {
+        aliceCallSocket.once('connect', resolve)
+        aliceCallSocket.once('connect_error', reject)
+      })
+      const inviteEvent = new Promise<{ conversationId: string; callId: string; type: string; fromUserId: string }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timed out waiting for a call invite')), 3000)
+        brunoSocket.once('call:signal', event => { clearTimeout(timeout); resolve(event) })
+      })
+      const inviteAck = await new Promise<{ ok: boolean }>(resolve => aliceCallSocket.emit('call:signal', { conversationId: accepted.conversationId, callId: 'a'.repeat(32), type: 'invite' }, resolve))
+      assert.equal(inviteAck.ok, true)
+      const invite = await inviteEvent
+      assert.equal(invite.type, 'invite')
+      assert.equal(invite.conversationId, accepted.conversationId)
+      assert.equal(invite.fromUserId, alice.user.id)
+      const unauthorizedSignal = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('call:signal', { conversationId: accepted.conversationId, callId: 'a'.repeat(32), type: 'answer', payload: { type: 'answer', sdp: 'x' } }, resolve))
+      assert.equal(unauthorizedSignal.ok, false)
+      const answerEvent = new Promise<{ type: string; callId: string }>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Timed out waiting for a call response')), 3000)
+        aliceCallSocket.once('call:signal', event => { clearTimeout(timeout); resolve(event) })
+      })
+      const acceptAck = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('call:signal', { conversationId: accepted.conversationId, callId: 'a'.repeat(32), type: 'accept' }, resolve))
+      assert.equal(acceptAck.ok, true)
+      assert.deepEqual(await answerEvent, { conversationId: accepted.conversationId, callId: 'a'.repeat(32), type: 'accept', fromUserId: bruno.user.id, fromDisplayName: bruno.user.displayName })
+      const channelCallAck = await new Promise<{ ok: boolean }>(resolve => aliceCallSocket.emit('call:signal', { conversationId: generalChannel.conversationId, callId: 'b'.repeat(32), type: 'invite' }, resolve))
+      assert.equal(channelCallAck.ok, false)
+      const malformedCallAck = await new Promise<{ ok: boolean }>(resolve => aliceCallSocket.emit('call:signal', { conversationId: accepted.conversationId, callId: 'invalid', type: 'invite' }, resolve))
+      assert.equal(malformedCallAck.ok, false)
+    } finally {
+      aliceCallSocket.disconnect()
+    }
     const notificationEvent = new Promise<{ conversationId: string; messageId: string; author: string }>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Timed out waiting for a notification event')), 3000)
       brunoSocket.once('notification:new', event => { clearTimeout(timeout); resolve(event) })

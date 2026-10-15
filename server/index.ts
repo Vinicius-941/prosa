@@ -24,6 +24,7 @@ const allowedOrigins = configuredOrigins?.length ? configuredOrigins : ['http://
 const dataDir = path.resolve(process.env.PROSA_DATA_DIR ?? 'data')
 mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'prosa.sqlite'))
+const activeCalls = new Map<string, { conversationId: string; participants: Set<string>; initiatorId: string }>()
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
 db.exec(`
@@ -186,6 +187,43 @@ io.use((socket, next) => {
 io.on('connection', socket => {
   const user = socket.data.user as NonNullable<AuthRequest['user']>
   socket.join(`user:${user.id}`)
+  socket.on('call:signal', (request: unknown, acknowledge?: (result: { ok: boolean; error?: string }) => void) => {
+    const session = sessionUser.get(socket.data.tokenHash, Date.now())
+    if (!session || !request || typeof request !== 'object') return acknowledge?.({ ok: false, error: 'Sessão indisponível.' })
+    const signal = request as { conversationId?: unknown; callId?: unknown; type?: unknown; payload?: unknown }
+    const { conversationId, callId, type, payload } = signal
+    const allowedTypes = ['invite', 'accept', 'decline', 'busy', 'offer', 'answer', 'candidate', 'hangup']
+    if (typeof conversationId !== 'string' || !/^[a-f0-9]{32}$/.test(conversationId) || typeof callId !== 'string' || !/^[a-f0-9]{32}$/.test(callId) || typeof type !== 'string' || !allowedTypes.includes(type)) {
+      return acknowledge?.({ ok: false, error: 'Sinal de chamada inválido.' })
+    }
+    if (!canAccessConversation(conversationId, user.id)) return acknowledge?.({ ok: false, error: 'Essa conversa não está disponível.' })
+    const direct = db.prepare(`SELECT c.kind, peer.user_id AS peerUserId FROM conversations c
+      JOIN conversation_members mine ON mine.conversation_id = c.id AND mine.user_id = ?
+      JOIN conversation_members peer ON peer.conversation_id = c.id AND peer.user_id <> ?
+      WHERE c.id = ?`).get(user.id, user.id, conversationId) as { kind: string; peerUserId: string } | undefined
+    if (!direct || direct.kind !== 'direct') return acknowledge?.({ ok: false, error: 'Chamadas estão disponíveis apenas em conversas diretas.' })
+    if (type === 'invite' && payload !== undefined) return acknowledge?.({ ok: false, error: 'Convite de chamada inválido.' })
+    if (type !== 'invite' && !activeCalls.has(callId)) return acknowledge?.({ ok: false, error: 'Essa chamada não está mais ativa.' })
+    if (type === 'invite') {
+      if ([...activeCalls.values()].some(call => call.conversationId === conversationId)) return acknowledge?.({ ok: false, error: 'Já existe uma chamada nesta conversa.' })
+      activeCalls.set(callId, { conversationId, participants: new Set([user.id, direct.peerUserId]), initiatorId: user.id })
+      if (activeCalls.size > 1_000) activeCalls.delete(activeCalls.keys().next().value!)
+    } else {
+      const active = activeCalls.get(callId)
+      if (!active || active.conversationId !== conversationId || !active.participants.has(user.id) ||
+        (active.initiatorId === user.id && ['accept', 'decline', 'busy', 'answer'].includes(type)) ||
+        (active.initiatorId !== user.id && ['offer', 'answer'].includes(type))) {
+        return acknowledge?.({ ok: false, error: 'Sinal não permitido para esta chamada.' })
+      }
+      if (['hangup', 'decline', 'busy'].includes(type)) activeCalls.delete(callId)
+    }
+    if (payload !== undefined && Buffer.byteLength(JSON.stringify(payload), 'utf8') > 24_000) {
+      if (type === 'invite') activeCalls.delete(callId)
+      return acknowledge?.({ ok: false, error: 'Sinal de chamada muito grande.' })
+    }
+    io.to(`user:${direct.peerUserId}`).emit('call:signal', { conversationId, callId, type, payload, fromUserId: user.id, fromDisplayName: user.displayName })
+    return acknowledge?.({ ok: true })
+  })
   socket.on('conversation:join', (conversationId: unknown, acknowledge?: (result: { ok: boolean }) => void) => {
     const session = sessionUser.get(socket.data.tokenHash, Date.now())
     if (!session || typeof conversationId !== 'string' || conversationId.length > 64) return acknowledge?.({ ok: false })
@@ -248,7 +286,11 @@ function canAccessConversation(conversationId: string, userId: string) {
 }
 
 async function evictUsersFromConversation(conversationId: string, userIds: string[]) {
+  for (const [callId, call] of activeCalls) {
+    if (call.conversationId === conversationId && userIds.some(userId => call.participants.has(userId))) activeCalls.delete(callId)
+  }
   for (const userId of userIds) {
+    io.to(`user:${userId}`).emit('call:ended', { conversationId })
     const sockets = await io.in(`user:${userId}`).fetchSockets()
     for (const socket of sockets) await socket.leave(`conversation:${conversationId}`)
   }
