@@ -1,8 +1,10 @@
 import { Capacitor } from '@capacitor/core'
 
 export type ProsaUser = { id: string; username: string; displayName: string }
+export type ApiReaction = { emoji: string; count: number; reactedByMe: boolean }
+export type ApiReply = { id: string; author: string; text: string; deleted: boolean }
 export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null; peerUsername: string | null; unreadCount: number; communityId: string | null; communityName: string | null; channelName: string | null }
-export type ApiMessage = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null }
+export type ApiMessage = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null; replyTo?: ApiReply | null; reactions?: ApiReaction[] }
 export type ApiMessageSearchResult = ApiMessage & { conversationName: string }
 export type ApiCommunityChannel = { id: string; conversationId: string; name: string; position?: number }
 export type ApiCommunity = { id: string; name: string; inviteCode: string | null; role: 'owner' | 'admin' | 'member'; memberCount: number; channels: ApiCommunityChannel[] }
@@ -101,9 +103,10 @@ export const api = {
   messageContext: (id: string, messageId: string) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages?around=${encodeURIComponent(messageId)}`),
   searchMessages: (query: string) => request<{ messages: ApiMessageSearchResult[] }>(`/messages/search?q=${encodeURIComponent(query)}`),
   markRead: (id: string) => request<{ lastReadRowId: number }>(`/conversations/${encodeURIComponent(id)}/read`, { method: 'POST' }),
-  sendMessage: (id: string, text: string) => request<{ message: ApiMessage }>(`/conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) }),
+  sendMessage: (id: string, text: string, replyToMessageId?: string) => request<{ message: ApiMessage }>(`/conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify({ text, replyToMessageId }) }),
   updateMessage: (conversationId: string, messageId: string, text: string) => request<{ message: ApiMessage }>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, { method: 'PATCH', body: JSON.stringify({ text }) }),
   deleteMessage: (conversationId: string, messageId: string) => request<void>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}`, { method: 'DELETE' }),
+  toggleReaction: (conversationId: string, messageId: string, emoji: string) => request<{ reaction: ApiReaction }>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/reactions`, { method: 'PUT', body: JSON.stringify({ emoji }) }),
   searchUsers: (query: string) => request<{ users: ApiPerson[] }>(`/users/search?q=${encodeURIComponent(query)}`),
   friends: () => request<ApiFriendData>('/friends'),
   requestFriend: (username: string) => request<{ status: 'pending' | 'accepted'; id?: string; conversationId?: string }>('/friend-requests', { method: 'POST', body: JSON.stringify({ username }) }),

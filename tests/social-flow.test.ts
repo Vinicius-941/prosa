@@ -13,8 +13,11 @@ const legacyDb = new Database(path.join(process.env.PROSA_DATA_DIR, 'prosa.sqlit
 legacyDb.exec("CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 legacyDb.exec("CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 legacyDb.exec("CREATE TABLE sessions (token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, expires_at INTEGER NOT NULL)")
+legacyDb.exec("CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, author_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, body TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 const legacyToken = 'legacy-existing-session-token-012345678901'
 legacyDb.prepare('INSERT INTO users (id, username, display_name, password_hash) VALUES (?, ?, ?, ?)').run('legacy-user', 'legacy_user', 'Usuário anterior', 'unused')
+legacyDb.prepare('INSERT INTO conversations (id, title, color) VALUES (?, ?, ?)').run('c'.repeat(32), 'Histórico anterior', 'blue')
+legacyDb.prepare('INSERT INTO messages (id, conversation_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)').run('m'.repeat(32), 'c'.repeat(32), 'legacy-user', 'Mensagem anterior à atualização', new Date().toISOString())
 legacyDb.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)').run(createHash('sha256').update(legacyToken).digest('hex'), 'legacy-user', Date.now() + 60_000)
 legacyDb.close()
 
@@ -56,6 +59,12 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   const migratedSessions = await request<{ sessions: { id: string; label: string }[] }>('/sessions', legacyToken)
   assert.equal(migratedSessions.sessions.length, 1)
   assert.match(migratedSessions.sessions[0].id, /^[a-f0-9]{32}$/)
+  assert.equal((db.prepare('SELECT reply_to FROM messages WHERE id = ?').get('m'.repeat(32)) as { reply_to: string | null }).reply_to, null)
+  db.prepare('INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)').run('c'.repeat(32), 'legacy-user')
+  const migratedMessageHistory = await request<{ messages: { text: string; replyTo: null; reactions: unknown[] }[] }>(`/conversations/${'c'.repeat(32)}/messages`, legacyToken)
+  assert.equal(migratedMessageHistory.messages[0].text, 'Mensagem anterior à atualização')
+  assert.equal(migratedMessageHistory.messages[0].replyTo, null)
+  assert.deepEqual(migratedMessageHistory.messages[0].reactions, [])
   const alice = await register('alice', 'Alice Aurora')
   const bruno = await register('bruno', 'Bruno Bairro')
   const carla = await register('carla', 'Carla Costa')
@@ -196,8 +205,56 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(sent.message.text, 'Mensagem em tempo real')
     assert.equal((await nextLiveMessage).text, sent.message.text)
 
-    const history = await request<{ messages: { text: string }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
-    assert.equal(history.messages.at(-1)?.text, sent.message.text)
+    const liveReaction = new Promise<{ messageId: string; userId: string; emoji: string; count: number }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for a message reaction')), 3000)
+      brunoSocket.once('message:reaction', event => { clearTimeout(timeout); resolve(event) })
+    })
+    const addedReaction = await request<{ reaction: { emoji: string; count: number; reactedByMe: boolean } }>(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/reactions`, alice.token, {
+      method: 'PUT', body: JSON.stringify({ emoji: '👍' }),
+    })
+    assert.deepEqual(addedReaction.reaction, { emoji: '👍', count: 1, reactedByMe: true })
+    const reactionEvent = await liveReaction
+    assert.equal(reactionEvent.messageId, sent.message.id)
+    assert.equal(reactionEvent.userId, alice.user.id)
+    assert.equal(reactionEvent.count, 1)
+    const reactionHistory = await request<{ messages: { id: string; reactions: { emoji: string; count: number; reactedByMe: boolean }[] }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+    assert.deepEqual(reactionHistory.messages.find(message => message.id === sent.message.id)?.reactions, [{ emoji: '👍', count: 1, reactedByMe: false }])
+    const aliceReactionHistory = await request<{ messages: { id: string; reactions: { emoji: string; count: number; reactedByMe: boolean }[] }[] }>(`/conversations/${accepted.conversationId}/messages`, alice.token)
+    assert.deepEqual(aliceReactionHistory.messages.find(message => message.id === sent.message.id)?.reactions, [{ emoji: '👍', count: 1, reactedByMe: true }])
+    const removedReaction = await request<{ reaction: { emoji: string; count: number; reactedByMe: boolean } }>(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/reactions`, alice.token, {
+      method: 'PUT', body: JSON.stringify({ emoji: '👍' }),
+    })
+    assert.deepEqual(removedReaction.reaction, { emoji: '👍', count: 0, reactedByMe: false })
+    const restoredReaction = await request<{ reaction: { emoji: string; count: number; reactedByMe: boolean } }>(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/reactions`, alice.token, {
+      method: 'PUT', body: JSON.stringify({ emoji: '👍' }),
+    })
+    assert.deepEqual(restoredReaction.reaction, { emoji: '👍', count: 1, reactedByMe: true })
+    const unsupportedReaction = await sendHttp(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/reactions`, alice.token, {
+      method: 'PUT', body: JSON.stringify({ emoji: 'não é emoji' }),
+    })
+    assert.equal(unsupportedReaction.status, 400)
+    const outsiderReaction = await sendHttp(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/reactions`, carla.token, {
+      method: 'PUT', body: JSON.stringify({ emoji: '👍' }),
+    })
+    assert.equal(outsiderReaction.status, 404)
+    const outsiderReply = await sendHttp(`/conversations/${accepted.conversationId}/messages`, carla.token, {
+      method: 'POST', body: JSON.stringify({ text: 'Sem acesso', replyToMessageId: sent.message.id }),
+    })
+    assert.equal(outsiderReply.status, 404)
+
+    const liveReply = new Promise<{ id: string; replyTo: { id: string; author: string; text: string; deleted: boolean } }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for a message reply')), 3000)
+      brunoSocket.once('message:new', message => { clearTimeout(timeout); resolve(message) })
+    })
+    const reply = await request<{ message: { id: string; replyTo: { id: string; author: string; text: string; deleted: boolean } } }>(`/conversations/${accepted.conversationId}/messages`, alice.token, {
+      method: 'POST', body: JSON.stringify({ text: 'Resposta vinculada', replyToMessageId: sent.message.id }),
+    })
+    assert.equal(reply.message.replyTo.id, sent.message.id)
+    assert.equal(reply.message.replyTo.author, 'Alice Aurora')
+    assert.equal((await liveReply).replyTo.text, 'Mensagem em tempo real')
+
+    const history = await request<{ messages: { id: string; text: string }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+    assert.equal(history.messages.find(message => message.id === sent.message.id)?.text, sent.message.text)
 
     const forbiddenEdit = await fetch(`${origin}/api/conversations/${accepted.conversationId}/messages/${sent.message.id}`, {
       method: 'PATCH', headers: { authorization: `Bearer ${bruno.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Alteração indevida' }),
@@ -227,6 +284,20 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     const removed = removedHistory.messages.find(message => message.id === sent.message.id)
     assert.equal(removed?.text, '')
     assert.ok(removed?.deletedAt)
+    const replyHistory = await request<{ messages: { id: string; replyTo: { id: string; text: string; deleted: boolean } | null }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+    const persistedReply = replyHistory.messages.find(message => message.id === reply.message.id)
+    assert.equal(persistedReply?.replyTo?.id, sent.message.id)
+    assert.equal(persistedReply?.replyTo?.text, '')
+    assert.equal(persistedReply?.replyTo?.deleted, true)
+    const replyToRemovedMessage = await sendHttp(`/conversations/${accepted.conversationId}/messages`, alice.token, {
+      method: 'POST', body: JSON.stringify({ text: 'Resposta atrasada', replyToMessageId: sent.message.id }),
+    })
+    assert.equal(replyToRemovedMessage.status, 409)
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM message_reactions WHERE message_id = ?').get(sent.message.id) as { count: number }).count, 0)
+    const reactToDeleted = await sendHttp(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/reactions`, bruno.token, {
+      method: 'PUT', body: JSON.stringify({ emoji: '👍' }),
+    })
+    assert.equal(reactToDeleted.status, 409)
     const removedSearch = await request<{ messages: { id: string }[] }>('/messages/search?q=Mensagem%20atualizada', bruno.token)
     assert.ok(!removedSearch.messages.some(message => message.id === sent.message.id))
     const repeatedRemoval = await fetch(`${origin}/api/conversations/${accepted.conversationId}/messages/${sent.message.id}`, {

@@ -4,7 +4,7 @@ import { AccountDataControls } from './AccountDataControls'
 import { api, type ApiCommunity, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiMessageSearchResult, type ApiPerson, type ApiSession, type ProsaUser } from './api'
 import { io } from 'socket.io-client'
 
-type Message = { id: string; author: string; time: string; text: string; mine?: boolean; edited?: boolean; deleted?: boolean }
+type Message = { id: string; author: string; time: string; text: string; mine?: boolean; edited?: boolean; deleted?: boolean; replyTo?: { id: string; author: string; text: string; deleted: boolean } | null; reactions?: { emoji: string; count: number; reactedByMe: boolean }[] }
 type Conversation = { id: string; name: string; handle: string; initials: string; color: string; online?: boolean; preview: string; time: string; unreadCount: number; olderCursor: string | null; communityId: string | null; communityName: string | null; messages: Message[] }
 
 function localTime(value: string) {
@@ -12,7 +12,7 @@ function localTime(value: string) {
 }
 
 function fromApiMessage(message: ApiMessage, user: ProsaUser): Message {
-  return { id: message.id, author: message.authorId === user.id ? 'Você' : message.author, time: localTime(message.createdAt), text: message.text, mine: message.authorId === user.id, edited: Boolean(message.editedAt), deleted: Boolean(message.deletedAt) }
+  return { id: message.id, author: message.authorId === user.id ? 'Você' : message.author, time: localTime(message.createdAt), text: message.text, mine: message.authorId === user.id, edited: Boolean(message.editedAt), deleted: Boolean(message.deletedAt), replyTo: message.replyTo ?? null, reactions: message.reactions ?? [] }
 }
 
 function fromApiConversation(conversation: ApiConversation, page: { messages: ApiMessage[]; nextCursor: string | null }, user: ProsaUser): Conversation {
@@ -44,6 +44,8 @@ function App() {
   const [draft, setDraft] = useState('')
   const [editingMessageId, setEditingMessageId] = useState('')
   const [editDraft, setEditDraft] = useState('')
+  const [replyingTo, setReplyingTo] = useState<Message | null>(null)
+  const [reactionPickerId, setReactionPickerId] = useState('')
   const [notice, setNotice] = useState('')
   const [user, setUser] = useState<ProsaUser | null>(null)
   const [people, setPeople] = useState<ApiFriendData>({ friends: [], incoming: [], outgoing: [] })
@@ -204,9 +206,22 @@ function App() {
     socket.on('message:deleted', (event: { id: string; conversationId: string }) => {
       setChats(current => current.map(chat => chat.id !== event.conversationId ? chat : {
         ...chat, preview: chat.messages.at(-1)?.id === event.id ? 'Mensagem removida' : chat.preview,
-        messages: chat.messages.map(existing => existing.id === event.id ? { ...existing, text: '', deleted: true } : existing),
+        messages: chat.messages.map(existing => existing.id === event.id ? { ...existing, text: '', deleted: true, reactions: [] } : existing.replyTo?.id === event.id ? { ...existing, replyTo: { ...existing.replyTo, text: '', deleted: true } } : existing),
       }))
+      setReplyingTo(current => current?.id === event.id ? null : current)
       setSearchResults(current => current ? { ...current, messages: current.messages.filter(message => message.id !== event.id) } : current)
+    })
+    socket.on('message:reaction', (event: { messageId: string; conversationId: string; userId: string; emoji: string; count: number; reactedByMe: boolean }) => {
+      setChats(current => current.map(chat => chat.id !== event.conversationId ? chat : {
+        ...chat,
+        messages: chat.messages.map(message => {
+          if (message.id !== event.messageId) return message
+          const reactions = message.reactions ?? []
+          const next = reactions.filter(reaction => reaction.emoji !== event.emoji)
+          if (event.count > 0) next.push({ emoji: event.emoji, count: event.count, reactedByMe: event.userId === user.id && event.reactedByMe })
+          return { ...message, reactions: next }
+        }),
+      }))
     })
     return () => { socket.emit('conversation:leave', activeConversationId); socket.disconnect() }
   }, [activeConversationId, user])
@@ -314,12 +329,13 @@ function App() {
     const text = draft.trim()
     if (!text || !active) return
     try {
-      const { message } = await api.sendMessage(active.id, text)
+      const { message } = await api.sendMessage(active.id, text, replyingTo?.id)
       if (user) {
         const mapped = fromApiMessage(message, user)
         setChats(current => current.map(chat => chat.id === active.id && !chat.messages.some(existing => existing.id === mapped.id) ? { ...chat, preview: text, time: mapped.time, messages: [...chat.messages, mapped] } : chat))
       }
       setDraft('')
+      setReplyingTo(null)
     } catch (error) { setNotice(error instanceof Error ? error.message : 'A mensagem não foi enviada.') }
   }
 
@@ -349,6 +365,22 @@ function App() {
       }))
       setSearchResults(current => current ? { ...current, messages: current.messages.filter(message => message.id !== messageId) } : current)
     } catch (error) { setNotice(error instanceof Error ? error.message : 'A mensagem não foi removida.') }
+  }
+
+  async function toggleReaction(messageId: string, emoji: string) {
+    if (!active) return
+    try {
+      const { reaction } = await api.toggleReaction(active.id, messageId, emoji)
+      setChats(current => current.map(chat => chat.id !== active.id ? chat : {
+        ...chat,
+        messages: chat.messages.map(message => {
+          if (message.id !== messageId) return message
+          const next = (message.reactions ?? []).filter(item => item.emoji !== emoji)
+          if (reaction.count > 0) next.push(reaction)
+          return { ...message, reactions: next }
+        }),
+      }))
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível registrar a reação.') }
   }
 
   async function openConversation(id: string, targetMessageId?: string) {
@@ -439,9 +471,9 @@ function App() {
       <div className="message-scroll" ref={messageScrollRef} onScroll={event => { const element = event.currentTarget; nearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}><div className="day-divider"><span>HISTÓRICO</span></div>{active.olderCursor && <button className="load-older" disabled={loadingOlder} onClick={() => void loadOlderMessages()}>{loadingOlder ? 'Carregando…' : 'Carregar mensagens anteriores'}</button>}<div className="messages">{active.messages.map((message, index) => {
         const previous = active.messages[index - 1]
         const grouped = previous?.author === message.author
-        return <article key={message.id} data-message-id={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}{editingMessageId === message.id ? <form className="message-edit-form" onSubmit={saveMessageEdit}><textarea aria-label="Editar mensagem" maxLength={4000} value={editDraft} onChange={event => setEditDraft(event.target.value)} autoFocus /><div><button type="button" onClick={() => { setEditingMessageId(''); setEditDraft('') }}>Cancelar</button><button type="submit" disabled={!editDraft.trim()}>Salvar</button></div></form> : <><p className={message.deleted ? 'message-deleted' : undefined}>{message.deleted ? 'Esta mensagem foi removida.' : message.text}{message.edited && !message.deleted && <small className="message-edited"> editada</small>}</p>{message.mine && !message.deleted && <div className="message-actions"><button onClick={() => { setEditingMessageId(message.id); setEditDraft(message.text) }}>Editar</button><button onClick={() => void removeMessage(message.id)}>Remover</button></div>}</>}</div></article>
+        return <article key={message.id} data-message-id={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}{editingMessageId === message.id ? <form className="message-edit-form" onSubmit={saveMessageEdit}><textarea aria-label="Editar mensagem" maxLength={4000} value={editDraft} onChange={event => setEditDraft(event.target.value)} autoFocus /><div><button type="button" onClick={() => { setEditingMessageId(''); setEditDraft('') }}>Cancelar</button><button type="submit" disabled={!editDraft.trim()}>Salvar</button></div></form> : <>{message.replyTo && <button className="reply-preview" onClick={() => void openConversation(active.id, message.replyTo!.id)}><strong>{message.replyTo.author}</strong><span>{message.replyTo.deleted ? "Mensagem removida" : message.replyTo.text}</span></button>}<p className={message.deleted ? 'message-deleted' : undefined}>{message.deleted ? 'Esta mensagem foi removida.' : message.text}{message.edited && !message.deleted && <small className="message-edited"> editada</small>}</p>{message.mine && !message.deleted && <div className="message-actions"><button onClick={() => { setEditingMessageId(message.id); setEditDraft(message.text) }}>Editar</button><button onClick={() => void removeMessage(message.id)}>Remover</button></div>}</>}{!message.deleted && <div className={`message-social-controls ${reactionPickerId === message.id ? 'open' : ''}`}><button onClick={() => setReplyingTo(message)}>Responder</button><button aria-expanded={reactionPickerId === message.id} aria-controls={`reaction-picker-${message.id}`} onClick={() => setReactionPickerId(current => current === message.id ? '' : message.id)}>Reagir</button>{message.reactions?.map(reaction => <button key={reaction.emoji} className={`message-reaction ${reaction.reactedByMe ? 'selected' : ''}`} aria-label={`${reaction.emoji}: ${reaction.count}`} onClick={() => void toggleReaction(message.id, reaction.emoji)}>{reaction.emoji} <span>{reaction.count}</span></button>)}{reactionPickerId === message.id && !message.deleted && <span className="reaction-picker" id={`reaction-picker-${message.id}`}>{['👍', '❤️', '😂', '😮', '🎉', '🔥'].map(emoji => <button key={emoji} aria-label={`Reagir com ${emoji}`} onClick={() => { void toggleReaction(message.id, emoji); setReactionPickerId('') }}>{emoji}</button>)}</span>}</div>}</div></article>
       })}</div></div>
-      <form className="composer" onSubmit={sendMessage}><button type="button" className="composer-tool attach" aria-label="Anexar arquivo" onClick={() => setNotice('O envio de arquivos será ativado com o armazenamento do Prosa.')}><Icon name="paperclip" size={19} /></button><input aria-label="Escrever mensagem" value={draft} onChange={event => setDraft(event.target.value)} placeholder={`Escreva para ${active.name.split(' ')[0]}...`} /><button type="button" className="composer-tool" aria-label="Emoji" onClick={() => setDraft(value => `${value} ✨`)}><Icon name="smile" size={19} /></button><button type="submit" className="send-button" aria-label="Enviar mensagem" disabled={!draft.trim()}><Icon name="send" size={17} /></button></form>
+      <form className="composer" onSubmit={sendMessage}>{replyingTo && <div className="reply-draft"><span>Respondendo a <strong>{replyingTo.author}</strong>: {replyingTo.deleted ? 'Mensagem removida' : replyingTo.text}</span><button type="button" aria-label="Cancelar resposta" onClick={() => setReplyingTo(null)}>×</button></div>}<div className="composer-controls"><button type="button" className="composer-tool attach" aria-label="Anexar arquivo" onClick={() => setNotice('O envio de arquivos será ativado com o armazenamento do Prosa.')}><Icon name="paperclip" size={19} /></button><input aria-label="Escrever mensagem" value={draft} onChange={event => setDraft(event.target.value)} placeholder={`Escreva para ${active.name.split(' ')[0]}...`} /><button type="button" className="composer-tool" aria-label="Emoji" onClick={() => setDraft(value => `${value} ✨`)}><Icon name="smile" size={19} /></button><button type="submit" className="send-button" aria-label="Enviar mensagem" disabled={!draft.trim()}><Icon name="send" size={17} /></button></div></form>
       <footer className="chat-footnote">Mensagens salvas no banco local do Prosa.</footer></> : <div className="empty-chat"><span className="auth-brand">p</span><h2>Seu Prosa está pronto.</h2><p>Encontre pessoas pelo nome de usuário para começar uma conversa.</p><button className="auth-submit" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Encontrar pessoas</button></div>}
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Fechar aviso">×</button></div>}
       {addContactOpen && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setAddContactOpen(false) }}><section className="people-modal" role="dialog" aria-modal="true" aria-labelledby="add-contact-title"><button className="modal-close" onClick={() => setAddContactOpen(false)} aria-label="Fechar">×</button><p className="eyebrow">AMPLIE SUA REDE</p><h2 id="add-contact-title">Encontre pessoas</h2><p>Busque pelo nome de usuário para enviar um pedido de conexão.</p><label className="people-search"><Icon name="search" size={17} /><input autoFocus value={peopleQuery} onChange={event => { setPeopleQuery(event.target.value); if (event.target.value.trim().replace(/^@/, '').length < 2) setPeopleResults([]) }} placeholder="Digite pelo menos 2 caracteres" /></label><div className="people-results">{peopleQuery.trim().length < 2 ? <p className="empty-people">Comece digitando um nome de usuário.</p> : peopleResults.length ? peopleResults.map(person => <article className="person-row" key={person.id}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username}</span></div>{person.relationship === 'none' && <button className="person-action primary" onClick={() => void sendFriendRequest(person)}>Conectar</button>}{person.relationship === 'incoming' && <button className="person-action primary" onClick={() => void acceptRequest(person)}>Aceitar</button>}{person.relationship === 'outgoing' && <span className="relationship-label">Pedido enviado</span>}{person.relationship === 'friend' && <span className="relationship-label">Conectados</span>}</article>) : <p className="empty-people">Nenhuma pessoa encontrada.</p>}</div></section></div>}
