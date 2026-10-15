@@ -25,6 +25,24 @@ const dataDir = path.resolve(process.env.PROSA_DATA_DIR ?? 'data')
 mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'prosa.sqlite'))
 const activeCalls = new Map<string, { conversationId: string; participants: Set<string>; initiatorId: string; phase: 'ringing' | 'connecting' | 'active'; createdAt: number }>()
+const callSignalRates = new Map<string, { startedAt: number; count: number }>()
+let callSignalRateSweepAt = 0
+const callSignalRateWindowMs = 10_000
+const callSignalRateLimit = 100
+function allowCallSignal(userId: string, now: number) {
+  if (now - callSignalRateSweepAt >= 60_000) {
+    for (const [id, window] of callSignalRates) if (now - window.startedAt >= callSignalRateWindowMs * 2) callSignalRates.delete(id)
+    callSignalRateSweepAt = now
+  }
+  let window = callSignalRates.get(userId)
+  if (!window || now - window.startedAt >= callSignalRateWindowMs) {
+    window = { startedAt: now, count: 0 }
+    callSignalRates.set(userId, window)
+  }
+  if (window.count >= callSignalRateLimit) return false
+  window.count++
+  return true
+}
 db.pragma('journal_mode = WAL')
 db.pragma('foreign_keys = ON')
 db.exec(`
@@ -87,6 +105,10 @@ db.exec(`
     PRIMARY KEY (conversation_id, user_id)
   );
 `)
+const userColumns = db.pragma('table_info(users)') as { name: string }[]
+if (!userColumns.some(column => column.name === 'bio')) db.exec("ALTER TABLE users ADD COLUMN bio TEXT NOT NULL DEFAULT ''")
+if (!userColumns.some(column => column.name === 'avatar_color')) db.exec("ALTER TABLE users ADD COLUMN avatar_color TEXT NOT NULL DEFAULT 'violet'")
+if (!userColumns.some(column => column.name === 'avatar_frame')) db.exec("ALTER TABLE users ADD COLUMN avatar_frame TEXT NOT NULL DEFAULT 'none'")
 const messageColumns = db.pragma('table_info(messages)') as { name: string }[]
 if (!messageColumns.some(column => column.name === 'edited_at')) db.exec('ALTER TABLE messages ADD COLUMN edited_at TEXT')
 if (!messageColumns.some(column => column.name === 'deleted_at')) db.exec('ALTER TABLE messages ADD COLUMN deleted_at TEXT')
@@ -158,7 +180,33 @@ db.exec(`
 const app = express()
 app.disable('x-powered-by')
 app.use(helmet())
-app.use(cors({ origin: allowedOrigins }))
+app.use(cors({ origin: allowedOrigins, credentials: true, exposedHeaders: ['x-prosa-session-migrated'] }))
+function cookieValue(header: string | undefined, name: string) {
+  return header?.split(';').map(value => value.trim()).find(value => value.startsWith(`${name}=`))?.slice(name.length + 1)
+}
+function isBrowserClient(req: Request) {
+  const origin = req.header('origin')
+  return req.header('x-prosa-client') === 'web' && Boolean(origin && allowedOrigins.includes(origin))
+}
+function setWebCookie(res: Response, req: Request, name: string, value: string, maxAge: number) {
+  const secure = production || req.secure
+  res.cookie(name, value, { httpOnly: true, secure, sameSite: secure ? 'none' : 'lax', path: '/', maxAge })
+}
+function clearWebCookies(res: Response, req: Request) {
+  const secure = production || req.secure
+  const options = { httpOnly: true, secure, sameSite: secure ? 'none' as const : 'lax' as const, path: '/' }
+  res.clearCookie('prosa_session', options)
+  res.clearCookie('prosa_csrf', options)
+}
+app.use((req, res, next) => {
+  if (req.header('x-prosa-client') !== 'web') return next()
+  if (!isBrowserClient(req)) return res.status(403).json({ error: 'Origem da solicitação inválida.' })
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) {
+    const cookie = cookieValue(req.header('cookie'), 'prosa_csrf')
+    if (!cookie || cookie !== req.header('x-prosa-csrf')) return res.status(403).json({ error: 'A validação de segurança expirou. Tente novamente.' })
+  }
+  return next()
+})
 app.use(express.json({ limit: '32kb' }))
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false }))
 app.use('/api/users/search', rateLimit({ windowMs: 60_000, limit: 90, standardHeaders: 'draft-8', legacyHeaders: false }))
@@ -167,29 +215,52 @@ app.use('/api/friend-requests', rateLimit({ windowMs: 60 * 60_000, limit: 40, st
 app.use('/api/communities/join', rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false }))
 
 const createSession = db.prepare('INSERT INTO sessions (id, token_hash, user_id, label, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-const sessionUser = db.prepare(`SELECT users.id, users.username, users.display_name AS displayName
+const sessionUser = db.prepare(`SELECT users.id, users.username, users.display_name AS displayName, users.bio,
+  users.avatar_color AS avatarColor, users.avatar_frame AS avatarFrame
   FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ? AND sessions.expires_at > ?`)
-type AuthRequest = Request & { user?: { id: string; username: string; displayName: string }; sessionId?: string; tokenHash?: string }
+const sessionExpiry = db.prepare('SELECT expires_at AS expiresAt FROM sessions WHERE token_hash = ? AND expires_at > ?')
+type AuthRequest = Request & { user?: { id: string; username: string; displayName: string; bio: string; avatarColor: string; avatarFrame: string }; sessionId?: string; tokenHash?: string }
 const httpServer = createServer(app)
-const io = new Server(httpServer, { cors: { origin: allowedOrigins }, maxHttpBufferSize: 32_000 })
+const io = new Server(httpServer, { cors: { origin: allowedOrigins, credentials: true }, maxHttpBufferSize: 32_000 })
 
 io.use((socket, next) => {
-  const token = socket.handshake.auth?.token
+  const origin = socket.handshake.headers.origin
+  const cookieToken = origin && allowedOrigins.includes(origin) ? cookieValue(socket.handshake.headers.cookie, 'prosa_session') : undefined
+  const token = socket.handshake.auth?.token ?? cookieToken
   if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32,64}$/.test(token)) return next(new Error('Entre na sua conta para continuar.'))
   const tokenHash = createHash('sha256').update(token).digest('hex')
   const user = sessionUser.get(tokenHash, Date.now()) as AuthRequest['user'] | undefined
   if (!user) return next(new Error('Sua sessão expirou.'))
+  const expiry = sessionExpiry.get(tokenHash, Date.now()) as { expiresAt: number } | undefined
+  if (!expiry) return next(new Error('Sua sessão expirou.'))
   socket.data.user = user
   socket.data.tokenHash = tokenHash
+  socket.data.expiresAt = expiry.expiresAt
   return next()
 })
 
 io.on('connection', socket => {
   const user = socket.data.user as NonNullable<AuthRequest['user']>
   socket.join(`user:${user.id}`)
+  let expiryTimer: NodeJS.Timeout
+  const disconnectAtExpiry = () => {
+    const remaining = Number(socket.data.expiresAt) - Date.now()
+    if (remaining <= 0) {
+      socket.emit('session:expired')
+      socket.disconnect(true)
+      return
+    }
+    expiryTimer = setTimeout(disconnectAtExpiry, Math.min(remaining, 2_147_000_000))
+    expiryTimer.unref()
+  }
+  disconnectAtExpiry()
+  socket.once('disconnect', () => clearTimeout(expiryTimer))
   socket.on('call:signal', (request: unknown, acknowledge?: (result: { ok: boolean; error?: string }) => void) => {
     const session = sessionUser.get(socket.data.tokenHash, Date.now())
-    if (!session || !request || typeof request !== 'object') return acknowledge?.({ ok: false, error: 'Sessão indisponível.' })
+    if (!session) return acknowledge?.({ ok: false, error: 'Sessão indisponível.' })
+    const now = Date.now()
+    if (!allowCallSignal(user.id, now)) return acknowledge?.({ ok: false, error: 'Muitos sinais de chamada. Aguarde alguns segundos.' })
+    if (!request || typeof request !== 'object') return acknowledge?.({ ok: false, error: 'Sinal de chamada inválido.' })
     const signal = request as { conversationId?: unknown; callId?: unknown; type?: unknown; payload?: unknown }
     const { conversationId, callId, type, payload } = signal
     const allowedTypes = ['invite', 'accept', 'decline', 'busy', 'offer', 'answer', 'candidate', 'hangup']
@@ -245,22 +316,28 @@ io.on('connection', socket => {
 })
 
 function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
-  const token = req.header('authorization')?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1]
+  const token = req.header('authorization')?.match(/^Bearer ([A-Za-z0-9_-]+)$/)?.[1] ?? (isBrowserClient(req) ? cookieValue(req.header('cookie'), 'prosa_session') : undefined)
   if (!token) return res.status(401).json({ error: 'Entre na sua conta para continuar.' })
   const tokenHash = createHash('sha256').update(token).digest('hex')
   const user = sessionUser.get(tokenHash, Date.now()) as AuthRequest['user'] | undefined
   if (!user) {
     db.prepare('DELETE FROM sessions WHERE token_hash = ? AND expires_at <= ?').run(tokenHash, Date.now())
+    if (isBrowserClient(req)) clearWebCookies(res, req)
     return res.status(401).json({ error: 'Sua sessão expirou. Entre novamente.' })
   }
-  const session = db.prepare('SELECT id, last_seen_at AS lastSeenAt FROM sessions WHERE token_hash = ?').get(tokenHash) as { id: string; lastSeenAt: number } | undefined
+  const session = db.prepare('SELECT id, last_seen_at AS lastSeenAt, expires_at AS expiresAt FROM sessions WHERE token_hash = ?').get(tokenHash) as { id: string; lastSeenAt: number; expiresAt: number } | undefined
   if (!session) {
     db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash)
+    if (isBrowserClient(req)) clearWebCookies(res, req)
     return res.status(401).json({ error: 'Sua sessão expirou. Entre novamente.' })
   }
   req.user = user
   req.sessionId = session.id
   req.tokenHash = tokenHash
+  if (isBrowserClient(req) && req.header('authorization')) {
+    setWebCookie(res, req, 'prosa_session', token, Math.max(0, session.expiresAt - Date.now()))
+    res.setHeader('x-prosa-session-migrated', '1')
+  }
   if (Date.now() - session.lastSeenAt > 60_000) db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ?').run(Date.now(), session.id)
   return next()
 }
@@ -313,6 +390,23 @@ app.get('/api/health', (_req, res) => {
   }
 })
 
+app.get('/api/auth/csrf', (req, res) => {
+  if (!isBrowserClient(req)) return res.status(400).json({ error: 'Esta sessão não usa autenticação por cookie.' })
+  const token = randomBytes(32).toString('base64url')
+  setWebCookie(res, req, 'prosa_csrf', token, 30 * 24 * 60 * 60_000)
+  return res.json({ token })
+})
+
+app.get('/api/auth/session', requireAuth, (_req, res) => res.json({ active: true }))
+
+function finishAuthentication(req: Request, res: Response, token: string, user: object, status = 200) {
+  if (isBrowserClient(req)) {
+    setWebCookie(res, req, 'prosa_session', token, 30 * 24 * 60 * 60_000)
+    return res.status(status).json({ user })
+  }
+  return res.status(status).json({ token, user })
+}
+
 app.post('/api/auth/register', async (req, res, next) => {
   try {
     const username = String(req.body?.username ?? '').trim().toLowerCase()
@@ -329,7 +423,7 @@ app.post('/api/auth/register', async (req, res, next) => {
     db.prepare('INSERT INTO conversations (id, title, color) VALUES (?, ?, ?)').run(conversation, displayName, 'coral')
     db.prepare('INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)').run(conversation, id)
     const token = newSession(id, req.header('user-agent'))
-    return res.status(201).json({ token, user: { id, username, displayName } })
+    return finishAuthentication(req, res, token, { id, username, displayName, bio: '', avatarColor: 'violet', avatarFrame: 'none' }, 201)
   } catch (error) { return next(error) }
 })
 
@@ -337,9 +431,9 @@ app.post('/api/auth/login', async (req, res, next) => {
   try {
     const username = String(req.body?.username ?? '').trim().toLowerCase()
     const password = String(req.body?.password ?? '')
-    const user = db.prepare('SELECT id, username, display_name AS displayName, password_hash AS passwordHash FROM users WHERE username = ?').get(username) as { id: string; username: string; displayName: string; passwordHash: string } | undefined
+    const user = db.prepare('SELECT id, username, display_name AS displayName, bio, avatar_color AS avatarColor, avatar_frame AS avatarFrame, password_hash AS passwordHash FROM users WHERE username = ?').get(username) as { id: string; username: string; displayName: string; bio: string; avatarColor: string; avatarFrame: string; passwordHash: string } | undefined
     if (!user || !await argon2.verify(user.passwordHash, password).catch(() => false)) return res.status(401).json({ error: 'Nome de usuário ou senha incorretos.' })
-    return res.json({ token: newSession(user.id, req.header('user-agent')), user: { id: user.id, username: user.username, displayName: user.displayName } })
+    return finishAuthentication(req, res, newSession(user.id, req.header('user-agent')), { id: user.id, username: user.username, displayName: user.displayName, bio: user.bio, avatarColor: user.avatarColor, avatarFrame: user.avatarFrame })
   } catch (error) { return next(error) }
 })
 
@@ -349,14 +443,42 @@ app.post('/api/auth/logout', requireAuth, (req: AuthRequest, res) => {
   void io.in(`user:${req.user!.id}`).fetchSockets().then(sockets => {
     for (const socket of sockets) if (socket.data.tokenHash === tokenHash) socket.disconnect(true)
   })
+  if (isBrowserClient(req)) clearWebCookies(res, req)
   res.status(204).end()
 })
 
 app.get('/api/me', requireAuth, (req: AuthRequest, res) => res.json({ user: req.user }))
 
+app.patch('/api/me', requireAuth, rateLimit({ windowMs: 60 * 60_000, limit: 10, keyGenerator: req => (req as AuthRequest).user!.id, standardHeaders: 'draft-8', legacyHeaders: false }), (req: AuthRequest, res) => {
+  const displayName = String(req.body?.displayName ?? '').trim()
+  const username = String(req.body?.username ?? '').trim().toLowerCase()
+  const bio = String(req.body?.bio ?? '').trim()
+  const avatarColor = String(req.body?.avatarColor ?? '')
+  const avatarFrame = String(req.body?.avatarFrame ?? '')
+  if (displayName.length < 1 || displayName.length > 48) return res.status(400).json({ error: 'O nome de exibição deve ter entre 1 e 48 caracteres.' })
+  if (!/^[a-z0-9_]{3,24}$/.test(username)) return res.status(400).json({ error: 'Use um identificador com 3 a 24 letras, números ou sublinhados.' })
+  if (bio.length > 160) return res.status(400).json({ error: 'A descrição pode ter até 160 caracteres.' })
+  if (!['violet', 'blue', 'green', 'coral'].includes(avatarColor) || !['none', 'ring', 'spark'].includes(avatarFrame)) return res.status(400).json({ error: 'A aparência selecionada não é válida.' })
+  const collision = db.prepare('SELECT 1 FROM users WHERE username = ? AND id <> ?').get(username, req.user!.id)
+  if (collision) return res.status(409).json({ error: 'Esse identificador já está em uso.' })
+  db.prepare('UPDATE users SET display_name = ?, username = ?, bio = ?, avatar_color = ?, avatar_frame = ? WHERE id = ?').run(displayName, username, bio, avatarColor, avatarFrame, req.user!.id)
+  const recipients = db.prepare(`SELECT id AS userId FROM users WHERE id = @me
+    UNION SELECT CASE WHEN requester_id = @me THEN addressee_id ELSE requester_id END FROM friendships
+      WHERE status = 'accepted' AND (requester_id = @me OR addressee_id = @me)
+    UNION SELECT cm.user_id FROM community_members mine JOIN community_members cm ON cm.community_id = mine.community_id
+      WHERE mine.user_id = @me`).all({ me: req.user!.id }) as { userId: string }[]
+  for (const recipient of recipients) {
+    io.to(`user:${recipient.userId}`).emit('contacts:changed')
+    io.to(`user:${recipient.userId}`).emit('conversations:changed')
+    io.to(`user:${recipient.userId}`).emit('communities:changed')
+  }
+  return res.json({ user: { ...req.user!, displayName, username, bio, avatarColor, avatarFrame } })
+})
+
 app.get('/api/account/export', requireAuth, rateLimit({ windowMs: 10 * 60_000, limit: 2, keyGenerator: req => (req as AuthRequest).user!.id, standardHeaders: 'draft-8', legacyHeaders: false }), (req: AuthRequest, res) => {
   const userId = req.user!.id
-  const profile = db.prepare(`SELECT id, username, display_name AS displayName, created_at AS createdAt
+  const profile = db.prepare(`SELECT id, username, display_name AS displayName, bio,
+    avatar_color AS avatarColor, avatar_frame AS avatarFrame, created_at AS createdAt
     FROM users WHERE id = ?`).get(userId)
   const sessions = db.prepare(`SELECT label, created_at AS createdAt, last_seen_at AS lastSeenAt, expires_at AS expiresAt
     FROM sessions WHERE user_id = ? ORDER BY created_at`).all(userId)
@@ -435,6 +557,7 @@ app.delete('/api/account', requireAuth, rateLimit({ windowMs: 60 * 60_000, limit
       io.to(`user:${affectedUser}`).emit('conversations:changed')
       io.to(`user:${affectedUser}`).emit('contacts:changed')
     }
+    if (isBrowserClient(req)) clearWebCookies(res, req)
     return res.status(204).end()
   } catch (error) { return next(error) }
 })
@@ -616,7 +739,8 @@ app.delete('/api/communities/:id', requireAuth, async (req: AuthRequest, res) =>
 app.get('/api/communities/:id/members', requireAuth, (req: AuthRequest, res) => {
   const membership = db.prepare('SELECT role FROM community_members WHERE community_id = ? AND user_id = ?').get(req.params.id, req.user!.id)
   if (!membership) return res.status(404).json({ error: 'Comunidade não encontrada.' })
-  const members = db.prepare(`SELECT cm.user_id AS id, u.username, u.display_name AS displayName, cm.role, cm.joined_at AS joinedAt
+  const members = db.prepare(`SELECT cm.user_id AS id, u.username, u.display_name AS displayName, u.bio,
+    u.avatar_color AS avatarColor, u.avatar_frame AS avatarFrame, cm.role, cm.joined_at AS joinedAt
     FROM community_members cm JOIN users u ON u.id = cm.user_id WHERE cm.community_id = ?
     ORDER BY CASE cm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, cm.joined_at, u.username`).all(req.params.id)
   return res.json({ members })
@@ -667,7 +791,8 @@ app.delete('/api/communities/:id/members/:userId', requireAuth, async (req: Auth
 app.get('/api/users/search', requireAuth, (req: AuthRequest, res) => {
   const query = String(req.query.q ?? '').trim().replace(/^@/, '').toLowerCase()
   if (query.length < 2) return res.json({ users: [] })
-  const users = db.prepare(`SELECT u.id, u.username, u.display_name AS displayName,
+  const users = db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, u.bio,
+    u.avatar_color AS avatarColor, u.avatar_frame AS avatarFrame,
     CASE WHEN f.status = 'accepted' THEN 'friend'
          WHEN f.addressee_id = @me AND f.status = 'pending' THEN 'incoming'
          WHEN f.requester_id = @me AND f.status = 'pending' THEN 'outgoing'
@@ -685,7 +810,8 @@ app.get('/api/messages/search', requireAuth, (req: AuthRequest, res) => {
   if (query.length > 100) return res.status(400).json({ error: 'A busca aceita até 100 caracteres.' })
   const pattern = `%${query.replace(/[!%_]/g, '!$&')}%`
   const messages = db.prepare(`SELECT m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-    u.display_name AS author, m.body AS text, m.created_at AS createdAt,
+    u.display_name AS author, u.avatar_color AS authorAvatarColor, u.avatar_frame AS authorAvatarFrame,
+    m.body AS text, m.created_at AS createdAt,
     CASE WHEN c.kind = 'direct' THEN (SELECT peer.display_name FROM conversation_members other
       JOIN users peer ON peer.id = other.user_id WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1)
       WHEN c.kind = 'channel' THEN (SELECT community.name || ' · #' || cc.name FROM community_channels cc
@@ -707,13 +833,16 @@ app.get('/api/messages/search', requireAuth, (req: AuthRequest, res) => {
 })
 
 app.get('/api/friends', requireAuth, (req: AuthRequest, res) => {
-  const friends = db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, f.updated_at AS since
+  const friends = db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, u.bio,
+    u.avatar_color AS avatarColor, u.avatar_frame AS avatarFrame, f.updated_at AS since
     FROM friendships f JOIN users u ON u.id = CASE WHEN f.requester_id = @me THEN f.addressee_id ELSE f.requester_id END
     WHERE (f.requester_id = @me OR f.addressee_id = @me) AND f.status = 'accepted'
     ORDER BY u.username`).all({ me: req.user!.id })
-  const incoming = db.prepare(`SELECT f.id, u.id AS userId, u.username, u.display_name AS displayName, f.created_at AS since
+  const incoming = db.prepare(`SELECT f.id, u.id AS userId, u.username, u.display_name AS displayName, u.bio,
+    u.avatar_color AS avatarColor, u.avatar_frame AS avatarFrame, f.created_at AS since
     FROM friendships f JOIN users u ON u.id = f.requester_id WHERE f.addressee_id = ? AND f.status = 'pending' ORDER BY f.created_at`).all(req.user!.id)
-  const outgoing = db.prepare(`SELECT f.id, u.id AS userId, u.username, u.display_name AS displayName, f.created_at AS since
+  const outgoing = db.prepare(`SELECT f.id, u.id AS userId, u.username, u.display_name AS displayName, u.bio,
+    u.avatar_color AS avatarColor, u.avatar_frame AS avatarFrame, f.created_at AS since
     FROM friendships f JOIN users u ON u.id = f.addressee_id WHERE f.requester_id = ? AND f.status = 'pending' ORDER BY f.created_at`).all(req.user!.id)
   return res.json({ friends, incoming, outgoing })
 })
@@ -790,11 +919,12 @@ function createDirectConversation(firstId: string, secondId: string) {
 
 app.get('/api/conversations', requireAuth, (req: AuthRequest, res) => {
   const conversations = db.prepare(`SELECT c.id,
-    CASE WHEN c.kind = 'direct' THEN (SELECT u.display_name FROM conversation_members other JOIN users u ON u.id = other.user_id
-      WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) ELSE c.title END AS name,
+    CASE WHEN c.kind = 'direct' THEN peer.display_name WHEN c.kind = 'personal' THEN self.display_name ELSE c.title END AS name,
     c.color, c.created_at AS createdAt,
     CASE WHEN c.kind = 'direct' THEN (SELECT u.username FROM conversation_members other JOIN users u ON u.id = other.user_id
       WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) END AS peerUsername,
+    peer.display_name AS peerDisplayName, peer.bio AS peerBio,
+    peer.avatar_color AS peerAvatarColor, peer.avatar_frame AS peerAvatarFrame,
     community.id AS communityId, community.name AS communityName, cc.name AS channelName,
     (SELECT m.body FROM messages m WHERE m.conversation_id = c.id AND m.deleted_at IS NULL ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview,
     (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id AND m.deleted_at IS NULL ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS lastMessageAt
@@ -804,6 +934,9 @@ app.get('/api/conversations', requireAuth, (req: AuthRequest, res) => {
     FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
     LEFT JOIN community_channels cc ON cc.conversation_id = c.id
     LEFT JOIN communities community ON community.id = cc.community_id
+    LEFT JOIN users peer ON peer.id = CASE WHEN c.kind = 'direct' THEN (SELECT other.user_id FROM conversation_members other
+      WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) ELSE @me END
+    LEFT JOIN users self ON self.id = @me
     WHERE cm.user_id = @me AND (c.kind <> 'direct' OR EXISTS (
       SELECT 1 FROM conversation_members peer JOIN friendships f ON f.status = 'accepted'
       AND ((f.requester_id = @me AND f.addressee_id = peer.user_id) OR (f.requester_id = peer.user_id AND f.addressee_id = @me))
@@ -838,18 +971,21 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
   }
   const rows = pivot
     ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
+        u.display_name AS author, u.avatar_color AS authorAvatarColor, u.avatar_frame AS authorAvatarFrame,
+        m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
         FROM messages m JOIN users u ON u.id = m.author_id
         WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid <= ?))
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, pivot.createdAt, pivot.createdAt, pivot.sequence, limit + 1) as (ApiMessageRow & { sequence: number })[]
     : before
     ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
+        u.display_name AS author, u.avatar_color AS authorAvatarColor, u.avatar_frame AS authorAvatarFrame,
+        m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
         FROM messages m JOIN users u ON u.id = m.author_id
         WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < ?))
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, before.createdAt, before.createdAt, before.rowid, limit + 1) as (ApiMessageRow & { sequence: number })[]
     : db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
+        u.display_name AS author, u.avatar_color AS authorAvatarColor, u.avatar_frame AS authorAvatarFrame,
+        m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
         FROM messages m JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ?
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, limit + 1) as (ApiMessageRow & { sequence: number })[]
   const hasOlder = rows.length > limit
@@ -865,9 +1001,10 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
   const replyById = new Map<string, { id: string; author: string; text: string; deletedAt: string | null }>()
   if (replyIds.length) {
     const replyPlaceholders = replyIds.map(() => '?').join(',')
-    const replies = db.prepare(`SELECT m.id, u.display_name AS author, m.body AS text, m.deleted_at AS deletedAt
+    const replies = db.prepare(`SELECT m.id, u.display_name AS author, u.avatar_color AS authorAvatarColor,
+      u.avatar_frame AS authorAvatarFrame, m.body AS text, m.deleted_at AS deletedAt
       FROM messages m JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ? AND m.id IN (${replyPlaceholders})`)
-      .all(req.params.id, ...replyIds) as { id: string; author: string; text: string; deletedAt: string | null }[]
+      .all(req.params.id, ...replyIds) as { id: string; author: string; authorAvatarColor: string; authorAvatarFrame: string; text: string; deletedAt: string | null }[]
     for (const reply of replies) replyById.set(reply.id, reply)
   }
   const reactionByMessage = new Map<string, { emoji: string; count: number; reactedByMe: boolean }[]>()
@@ -883,7 +1020,7 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
     const reply = replyToId ? replyById.get(replyToId) : undefined
     return {
       ...message,
-      replyTo: replyToId && reply ? { id: reply.id, author: reply.author, text: reply.text, deleted: Boolean(reply.deletedAt) } : null,
+      replyTo: replyToId && reply ? { id: reply.id, author: reply.author, authorAvatarColor: reply.authorAvatarColor, authorAvatarFrame: reply.authorAvatarFrame, text: reply.text, deleted: Boolean(reply.deletedAt) } : null,
       reactions: reactionByMessage.get(message.id) ?? [],
     }
   })
@@ -911,7 +1048,7 @@ app.put('/api/conversations/:id/notification-settings', requireAuth, (req: AuthR
   return res.json({ conversationId, mutedUntil })
 })
 
-type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null; replyToId?: string | null; pinned: number }
+type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; authorAvatarColor: string; authorAvatarFrame: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null; replyToId?: string | null; pinned: number }
 
 app.post('/api/conversations/:id/read', requireAuth, (req: AuthRequest, res) => {
   if (!canAccessConversation(req.params.id, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
@@ -927,7 +1064,8 @@ app.get('/api/conversations/:conversationId/pins', requireAuth, (req: AuthReques
   const { conversationId } = req.params
   if (!canAccessConversation(conversationId, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
   const pins = db.prepare(`SELECT m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-    u.display_name AS author, m.body AS text, m.created_at AS createdAt, p.pinned_at AS pinnedAt,
+    u.display_name AS author, u.avatar_color AS authorAvatarColor, u.avatar_frame AS authorAvatarFrame,
+    m.body AS text, m.created_at AS createdAt, p.pinned_at AS pinnedAt,
     p.pinned_by AS pinnedBy FROM message_pins p JOIN messages m ON m.id = p.message_id
     JOIN users u ON u.id = m.author_id WHERE p.conversation_id = ? ORDER BY p.pinned_at DESC LIMIT 100`)
     .all(conversationId)
@@ -960,17 +1098,18 @@ app.post('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res)
   let replyTo: { id: string; author: string; text: string; deleted: boolean } | null = null
   if (replyToMessageId) {
     if (!/^[a-f0-9]{32}$/.test(replyToMessageId)) return res.status(400).json({ error: 'Mensagem de referência inválida.' })
-    const parent = db.prepare(`SELECT m.id, u.display_name AS author, m.body AS text, m.deleted_at AS deletedAt
+    const parent = db.prepare(`SELECT m.id, u.display_name AS author, u.avatar_color AS authorAvatarColor,
+      u.avatar_frame AS authorAvatarFrame, m.body AS text, m.deleted_at AS deletedAt
       FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ? AND m.conversation_id = ?`)
-      .get(replyToMessageId, req.params.id) as { id: string; author: string; text: string; deletedAt: string | null } | undefined
+      .get(replyToMessageId, req.params.id) as { id: string; author: string; authorAvatarColor: string; authorAvatarFrame: string; text: string; deletedAt: string | null } | undefined
     if (!parent) return res.status(404).json({ error: 'Mensagem de referência não encontrada.' })
     if (parent.deletedAt) return res.status(409).json({ error: 'Não é possível responder a uma mensagem removida.' })
-    replyTo = { id: parent.id, author: parent.author, text: parent.text, deleted: false }
+    replyTo = { id: parent.id, author: parent.author, authorAvatarColor: parent.authorAvatarColor, authorAvatarFrame: parent.authorAvatarFrame, text: parent.text, deleted: false }
   }
   const id = randomBytes(16).toString('hex')
   const createdAt = new Date().toISOString()
   db.prepare('INSERT INTO messages (id, conversation_id, author_id, body, created_at, reply_to) VALUES (?, ?, ?, ?, ?, ?)').run(id, req.params.id, req.user!.id, text, createdAt, replyTo?.id ?? null)
-  const message = { id, conversationId: req.params.id, authorId: req.user!.id, author: req.user!.displayName, text, createdAt, editedAt: null, deletedAt: null, replyTo, reactions: [] }
+  const message = { id, conversationId: req.params.id, authorId: req.user!.id, author: req.user!.displayName, authorAvatarColor: req.user!.avatarColor, authorAvatarFrame: req.user!.avatarFrame, text, createdAt, editedAt: null, deletedAt: null, replyTo, reactions: [] }
   const recipients = db.prepare(`SELECT cm.user_id AS userId, COALESCE(ns.muted_until, 0) AS mutedUntil
     FROM conversation_members cm LEFT JOIN conversation_notification_settings ns ON ns.conversation_id = cm.conversation_id AND ns.user_id = cm.user_id
     WHERE cm.conversation_id = ?`).all(req.params.id) as { userId: string; mutedUntil: number }[]
@@ -995,13 +1134,15 @@ app.patch('/api/conversations/:conversationId/messages/:messageId', requireAuth,
   const editedAt = new Date().toISOString()
   const updateResult = db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ? AND author_id = ? AND deleted_at IS NULL').run(text, editedAt, messageId, req.user!.id)
   if (!updateResult.changes) return res.status(409).json({ error: 'A mensagem já foi removida.' })
-  const replyTo = message.replyToId ? db.prepare(`SELECT m.id, u.display_name AS author, m.body AS text, m.deleted_at AS deletedAt
+  const replyTo = message.replyToId ? db.prepare(`SELECT m.id, u.display_name AS author, u.avatar_color AS authorAvatarColor,
+    u.avatar_frame AS authorAvatarFrame, m.body AS text, m.deleted_at AS deletedAt
     FROM messages m JOIN users u ON u.id = m.author_id WHERE m.id = ? AND m.conversation_id = ?`)
-    .get(message.replyToId, conversationId) as { id: string; author: string; text: string; deletedAt: string | null } | undefined : undefined
+    .get(message.replyToId, conversationId) as { id: string; author: string; authorAvatarColor: string; authorAvatarFrame: string; text: string; deletedAt: string | null } | undefined : undefined
   const reactions = db.prepare(`SELECT emoji, COUNT(*) AS count, MAX(user_id = ?) AS reactedByMe
     FROM message_reactions WHERE message_id = ? GROUP BY emoji ORDER BY emoji`).all(req.user!.id, messageId) as { emoji: string; count: number; reactedByMe: number }[]
-  const updated = { id: message.id, conversationId, authorId: message.authorId, author: req.user!.displayName, text, createdAt: message.createdAt, editedAt, deletedAt: message.deletedAt,
-    replyTo: message.replyToId && replyTo ? { id: replyTo.id, author: replyTo.author, text: replyTo.text, deleted: Boolean(replyTo.deletedAt) } : null,
+  const updated = { id: message.id, conversationId, authorId: message.authorId, author: req.user!.displayName,
+    authorAvatarColor: req.user!.avatarColor, authorAvatarFrame: req.user!.avatarFrame, text, createdAt: message.createdAt, editedAt, deletedAt: message.deletedAt,
+    replyTo: message.replyToId && replyTo ? { id: replyTo.id, author: replyTo.author, authorAvatarColor: replyTo.authorAvatarColor, authorAvatarFrame: replyTo.authorAvatarFrame, text: replyTo.text, deleted: Boolean(replyTo.deletedAt) } : null,
     reactions: reactions.map(reaction => ({ ...reaction, reactedByMe: Boolean(reaction.reactedByMe) })) }
   const recipients = db.prepare('SELECT user_id AS userId FROM conversation_members WHERE conversation_id = ?').all(conversationId) as { userId: string }[]
   for (const recipient of recipients) io.to(`user:${recipient.userId}`).emit('message:updated', updated)

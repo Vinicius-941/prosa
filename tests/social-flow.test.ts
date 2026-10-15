@@ -9,6 +9,8 @@ import { io as connectSocket } from 'socket.io-client'
 
 process.env.PROSA_NO_LISTEN = '1'
 process.env.PROSA_DATA_DIR = mkdtempSync(path.join(tmpdir(), 'prosa-social-'))
+process.env.NODE_ENV = 'production'
+process.env.CLIENT_ORIGIN = 'https://localhost'
 const legacyDb = new Database(path.join(process.env.PROSA_DATA_DIR, 'prosa.sqlite'))
 legacyDb.exec("CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
 legacyDb.exec("CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
@@ -35,6 +37,32 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   assert.equal(health.status, 200)
   assert.deepEqual(await health.json(), { status: 'ok', service: 'prosa' })
   const tag = Math.random().toString(36).slice(2, 10)
+
+  const webOrigin = 'https://localhost'
+  const csrfResponse = await fetch(`${base}/auth/csrf`, { headers: { origin: webOrigin, 'x-prosa-client': 'web' } })
+  assert.equal(csrfResponse.status, 200)
+  const csrfToken = (await csrfResponse.json() as { token: string }).token
+  const csrfSetCookie = csrfResponse.headers.getSetCookie().join('; ')
+  assert.match(csrfSetCookie, /prosa_csrf=.*HttpOnly.*Secure.*SameSite=None/)
+  const webUsername = `web_${tag}`
+  const webLogin = await fetch(`${base}/auth/register`, {
+    method: 'POST', headers: { origin: webOrigin, 'x-prosa-client': 'web', 'x-prosa-csrf': csrfToken, cookie: `prosa_csrf=${csrfToken}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ username: webUsername, displayName: 'Sessão web', password: 'SenhaSegura!2026' }),
+  })
+  assert.equal(webLogin.status, 201)
+  assert.equal((await webLogin.json() as { token?: string }).token, undefined)
+  const webSessionCookie = webLogin.headers.getSetCookie().find(cookie => cookie.startsWith('prosa_session='))
+  assert.match(webSessionCookie ?? '', /HttpOnly.*Secure.*SameSite=None/)
+  const webCookie = `${webSessionCookie!.split(';')[0]}; prosa_csrf=${csrfToken}`
+  const webSession = await fetch(`${base}/auth/session`, { headers: { origin: webOrigin, 'x-prosa-client': 'web', cookie: webCookie } })
+  assert.deepEqual(await webSession.json(), { active: true })
+  const webMutationWithoutCsrf = await fetch(`${base}/communities`, { method: 'POST', headers: { origin: webOrigin, 'x-prosa-client': 'web', cookie: webCookie, 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Bloqueada' }) })
+  assert.equal(webMutationWithoutCsrf.status, 403)
+  const webLogout = await fetch(`${base}/auth/logout`, { method: 'POST', headers: { origin: webOrigin, 'x-prosa-client': 'web', 'x-prosa-csrf': csrfToken, cookie: webCookie } })
+  assert.equal(webLogout.status, 204)
+  assert.ok(webLogout.headers.getSetCookie().some(cookie => cookie.startsWith('prosa_session=;') && /Expires=Thu, 01 Jan 1970/i.test(cookie)))
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)').get(webUsername) as { count: number }).count, 0)
+  db.prepare('DELETE FROM users WHERE username = ?').run(webUsername)
 
   async function sendHttp(route: string, token?: string, init: RequestInit = {}) {
     return fetch(`${base}${route}`, {
@@ -69,6 +97,17 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   const bruno = await register('bruno', 'Bruno Bairro')
   const carla = await register('carla', 'Carla Costa')
   const charlie = await register('charlie', 'Charlie Costa')
+  const changedUsername = `${alice.user.username}_new`
+  const profileUpdate = await request<{ user: { displayName: string; username: string; bio: string; avatarColor: string; avatarFrame: string } }>('/me', alice.token, {
+    method: 'PATCH', body: JSON.stringify({ displayName: 'Alice Aurora', username: changedUsername, bio: 'Gosto de conversar.', avatarColor: 'blue', avatarFrame: 'ring' }),
+  })
+  assert.deepEqual(profileUpdate.user, { id: alice.user.id, displayName: 'Alice Aurora', username: changedUsername, bio: 'Gosto de conversar.', avatarColor: 'blue', avatarFrame: 'ring' })
+  alice.user.username = changedUsername
+  const savedProfile = await request<{ user: { username: string; bio: string; avatarColor: string; avatarFrame: string } }>('/me', alice.token)
+  assert.deepEqual([savedProfile.user.username, savedProfile.user.bio, savedProfile.user.avatarColor, savedProfile.user.avatarFrame], [changedUsername, 'Gosto de conversar.', 'blue', 'ring'])
+  assert.equal((await sendHttp('/me', alice.token, { method: 'PATCH', body: JSON.stringify({ displayName: 'Alice', username: bruno.user.username, bio: '', avatarColor: 'blue', avatarFrame: 'ring' }) })).status, 409)
+  assert.equal((await sendHttp('/me', alice.token, { method: 'PATCH', body: JSON.stringify({ displayName: 'Alice', username: `${alice.user.username}_new`, bio: 'x'.repeat(161), avatarColor: 'blue', avatarFrame: 'ring' }) })).status, 400)
+  assert.equal((await sendHttp('/me', alice.token, { method: 'PATCH', body: JSON.stringify({ displayName: 'Alice', username: `${alice.user.username}_new`, bio: '', avatarColor: 'url', avatarFrame: 'ring' }) })).status, 400)
   const aliceSecondSession = await request<Account>('/auth/login', undefined, {
     method: 'POST', headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit Chrome/130.0' },
     body: JSON.stringify({ username: alice.user.username, password: 'SenhaDeIntegracao!2026' }),
@@ -108,21 +147,24 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   await request<void>('/auth/logout', reauthenticatedAlice.token, { method: 'POST' })
   assert.equal((await sendHttp('/me', reauthenticatedAlice.token)).status, 401)
 
-  const search = await request<{ users: { username: string }[] }>(`/users/search?q=${bruno.user.username}`, alice.token)
+  const search = await request<{ users: { username: string; bio: string; avatarColor: string; avatarFrame: string }[] }>(`/users/search?q=${bruno.user.username}`, alice.token)
   assert.ok(search.users.some(person => person.username === bruno.user.username))
+  const aliceSearchResult = await request<{ users: { username: string; bio: string; avatarColor: string; avatarFrame: string }[] }>(`/users/search?q=${alice.user.username}`, bruno.token)
+  assert.deepEqual(aliceSearchResult.users.map(person => [person.bio, person.avatarColor, person.avatarFrame]), [['Gosto de conversar.', 'blue', 'ring']])
 
   const pending = await request<{ status: string }>('/friend-requests', alice.token, {
     method: 'POST', body: JSON.stringify({ username: bruno.user.username }),
   })
   assert.equal(pending.status, 'pending')
-  const inbox = await request<{ incoming: { username: string }[] }>('/friends', bruno.token)
+  const inbox = await request<{ incoming: { username: string; avatarColor: string; avatarFrame: string }[] }>('/friends', bruno.token)
   assert.ok(inbox.incoming.some(person => person.username === alice.user.username))
 
   const accepted = await request<{ status: string; conversationId: string }>('/friend-requests', bruno.token, {
     method: 'POST', body: JSON.stringify({ username: alice.user.username }),
   })
   assert.equal(accepted.status, 'accepted')
-
+  const directIdentity = await request<{ conversations: { id: string; peerUsername: string | null; peerAvatarColor: string }[] }>('/conversations', bruno.token)
+  assert.ok(directIdentity.conversations.some(conversation => conversation.id === accepted.conversationId && conversation.peerUsername === alice.user.username && conversation.peerAvatarColor === 'blue'))
   const newCommunity = await request<{ community: { id: string; inviteCode: string; channels: { id: string; conversationId: string; name: string }[] } }>('/communities', alice.token, {
     method: 'POST', body: JSON.stringify({ name: 'Núcleo Prosa' }),
   })
@@ -139,8 +181,10 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   assert.equal(brunoCommunity.communities[0].channels[0].conversationId, generalChannel.conversationId)
   const outsiderMembers = await sendHttp(`/communities/${newCommunity.community.id}/members`, carla.token)
   assert.equal(outsiderMembers.status, 404)
-  const members = await request<{ members: { id: string; role: string }[] }>(`/communities/${newCommunity.community.id}/members`, alice.token)
+  const members = await request<{ members: { id: string; role: string; avatarColor: string; avatarFrame: string }[] }>(`/communities/${newCommunity.community.id}/members`, alice.token)
   assert.deepEqual(members.members.map(member => member.role), ['owner', 'member'])
+  const aliceCommunityIdentity = members.members.find(member => member.id === alice.user.id)
+  assert.deepEqual(aliceCommunityIdentity && [aliceCommunityIdentity.avatarColor, aliceCommunityIdentity.avatarFrame], ['blue', 'ring'])
   const unauthorizedInviteRotation = await sendHttp(`/communities/${newCommunity.community.id}/invite/rotate`, bruno.token, { method: 'POST' })
   assert.equal(unauthorizedInviteRotation.status, 403)
   const rotatedInvite = await request<{ inviteCode: string }>(`/communities/${newCommunity.community.id}/invite/rotate`, alice.token, { method: 'POST' })
@@ -224,6 +268,10 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   await request(`/conversations/${accepted.conversationId}/read`, bruno.token, { method: 'POST' })
   const read = await request<{ conversations: { id: string; unreadCount: number }[] }>('/conversations', bruno.token)
   assert.equal(read.conversations.find(item => item.id === accepted.conversationId)?.unreadCount, 0)
+  const identityMessage = await request<{ message: { id: string } }>(`/conversations/${accepted.conversationId}/messages`, alice.token, { method: 'POST', body: JSON.stringify({ text: 'Perfil aplicado à conversa' }) })
+  const brunoHistory = await request<{ messages: { id: string; authorAvatarColor: string; authorAvatarFrame: string }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+  const identityMessageInHistory = brunoHistory.messages.find(message => message.id === identityMessage.message.id)
+  assert.deepEqual(identityMessageInHistory && [identityMessageInHistory.authorAvatarColor, identityMessageInHistory.authorAvatarFrame], ['blue', 'ring'])
 
   const brunoSocket = connectSocket(origin, { auth: { token: bruno.token }, reconnection: false })
   try {
@@ -231,10 +279,44 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
       brunoSocket.once('connect', resolve)
       brunoSocket.once('connect_error', reject)
     })
+    const expiringSession = await request<{ token: string }>('/auth/login', undefined, {
+      method: 'POST', body: JSON.stringify({ username: bruno.user.username, password: 'SenhaDeIntegracao!2026' }),
+    })
+    const expiringTokenHash = createHash('sha256').update(expiringSession.token).digest('hex')
+    db.prepare('UPDATE sessions SET expires_at = ? WHERE token_hash = ?').run(Date.now() + 1000, expiringTokenHash)
+    const expiringSocket = connectSocket(origin, { auth: { token: expiringSession.token }, reconnection: false })
+    try {
+      const expirationNotice = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('The connected socket did not receive its session-expired notice')), 3000)
+        expiringSocket.once('session:expired', () => { clearTimeout(timer); resolve() })
+      })
+      const expirationDisconnect = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('The expired session socket remained connected')), 3000)
+        expiringSocket.once('disconnect', () => { clearTimeout(timer); resolve() })
+      })
+      await new Promise<void>((resolve, reject) => {
+        expiringSocket.once('connect', resolve)
+        expiringSocket.once('connect_error', reject)
+      })
+      await expirationNotice
+      await expirationDisconnect
+      assert.equal((await sendHttp('/me', expiringSession.token)).status, 401)
+    } finally {
+      expiringSocket.disconnect()
+    }
     const joined = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', accepted.conversationId, resolve))
     assert.equal(joined.ok, true)
     const joinedChannel = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
     assert.equal(joinedChannel.ok, true)
+    for (const invalidLeave of [null, {}, 42, 'x'.repeat(65)]) brunoSocket.emit('conversation:leave', invalidLeave)
+    const retainedRoomEvent = new Promise<{ id: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Malformed leave removed the socket from its authorized room')), 3000)
+      brunoSocket.once('message:new', message => { clearTimeout(timeout); resolve(message) })
+    })
+    const retainedRoomMessage = await request<{ message: { id: string } }>(`/conversations/${accepted.conversationId}/messages`, alice.token, {
+      method: 'POST', body: JSON.stringify({ text: 'Sala mantida após leave inválido' }),
+    })
+    assert.equal((await retainedRoomEvent).id, retainedRoomMessage.message.id)
     const aliceCallSocket = connectSocket(origin, { auth: { token: alice.token }, reconnection: false })
     try {
       await new Promise<void>((resolve, reject) => {
@@ -273,6 +355,21 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
       assert.equal(channelCallAck.ok, false)
       const malformedCallAck = await new Promise<{ ok: boolean }>(resolve => aliceCallSocket.emit('call:signal', { conversationId: accepted.conversationId, callId: 'invalid', type: 'invite' }, resolve))
       assert.equal(malformedCallAck.ok, false)
+      const callSignalBurst = await Promise.all(Array.from({ length: 110 }, () => new Promise<{ ok: boolean; error?: string }>(resolve => {
+        aliceCallSocket.emit('call:signal', { conversationId: accepted.conversationId, callId: 'd'.repeat(32), type: 'hangup' }, resolve)
+      })))
+      assert.ok(callSignalBurst.some(result => result.error === 'Muitos sinais de chamada. Aguarde alguns segundos.'))
+      const secondAliceSocket = connectSocket(origin, { auth: { token: alice.token }, reconnection: false })
+      try {
+        await new Promise<void>((resolve, reject) => {
+          secondAliceSocket.once('connect', resolve)
+          secondAliceSocket.once('connect_error', reject)
+        })
+        const accountLimit = await new Promise<{ ok: boolean; error?: string }>(resolve => secondAliceSocket.emit('call:signal', { conversationId: accepted.conversationId, callId: 'e'.repeat(32), type: 'hangup' }, resolve))
+        assert.equal(accountLimit.error, 'Muitos sinais de chamada. Aguarde alguns segundos.')
+      } finally {
+        secondAliceSocket.disconnect()
+      }
     } finally {
       aliceCallSocket.disconnect()
     }

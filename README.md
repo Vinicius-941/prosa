@@ -8,11 +8,13 @@ The client supports account creation, sign-in, per-device active-session listing
 
 This is an early development foundation. Email verification, account recovery, multi-factor authentication, shared multi-device synchronization, attachments, moderation, video, and group calls are not implemented. One-to-one audio uses peer-to-peer WebRTC and a public STUN service; restrictive networks may need TURN, which is not configured yet. Android is available as a debug preview and requires a separately hosted API. The audio implementation still needs testing on physical devices and different networks.
 
+Electron stores its session token with the operating system's secure-storage facility. Linux requires an available system keyring. Android encrypts the session token with an AES-GCM key held by Android Keystore and migrates the previous web-storage copy after it can read the protected vault. Browser sessions use HttpOnly cookies and CSRF checks; production deployments should serve the client and API from the same site or through a shared-domain proxy because browsers may block third-party cookies.
+
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed feature matrix and remaining work.
 
 ## Android preview
 
-The Android client is an installable Capacitor application that uses the same Prosa client and connects to an independently hosted Prosa API. On first launch, enter the API's HTTPS base address. Configure that service's `CLIENT_ORIGIN` to allow `https://localhost`, the Android WebView origin. Android source is in `android/`; build the web assets and sync them with `npm run android:sync`, then run the Gradle `assembleDebug` task from that directory. The CI workflow builds a debug APK for each change. A public API is not hosted by this repository; signed release APK/AAB, push notifications, and device-level session credential storage are not yet configured.
+The Android client is an installable Capacitor application that uses the same Prosa client and connects to an independently hosted Prosa API. On first launch, enter the API's HTTPS base address. Configure that service's `CLIENT_ORIGIN` to allow `https://localhost`, the Android WebView origin. Android source is in `android/`; build the web assets and sync them with `npm run android:sync`, then run the Gradle `assembleDebug` task from that directory with JDK 21. The CI workflow builds a debug APK for each change. A public API is not hosted by this repository; signed release APK/AAB and push notifications are not configured. Session tokens use an Android Keystore backed AES-GCM vault; physical-device validation remains required.
 
 ## Requirements
 
@@ -46,7 +48,7 @@ A production start command is available with `npm run api:start:prod` after `npm
 
 Run the account, connection-request, access-control, message-persistence, and live-delivery integration check with `npm test`.
 
-Current release: **0.1.2**. See [release notes](docs/releases/0.1.2.md).
+Latest published release: **0.1.2**. Version **0.1.3 is being prepared locally** and is not published; see [draft notes](docs/releases/0.1.3.md) and the [design audit](docs/research/prosa-0.1.3-design.md).
 
 Account export and deletion behavior is described in [docs/account-data.md](docs/account-data.md).
 

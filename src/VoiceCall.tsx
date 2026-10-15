@@ -111,7 +111,7 @@ export function VoiceCall({ conversationId, peerName, enabled, open, startSignal
 
   useEffect(() => {
     if (!enabled) return
-    const socket = io(api.socketOrigin(), { auth: { token: api.sessionToken() }, reconnection: true, reconnectionDelayMax: 5000 })
+    const socket = io(api.socketOrigin(), { auth: callback => { void api.sessionToken().then(token => callback(token ? { token } : {})) }, withCredentials: api.desktopPlatform() === 'web', reconnection: true, reconnectionDelayMax: 5000 })
     socketRef.current = socket
     socket.on('call:signal', (event: Signal) => {
       if (event.conversationId !== conversationId) return
