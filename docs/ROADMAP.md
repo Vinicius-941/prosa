@@ -14,7 +14,7 @@ A feature is marked implemented only when the behavior exists in the application
 | Persistent message create and history | Implemented | Messages are stored in SQLite, restricted to authorized participants, and fetched with stable cursor pagination |
 | Real-time message delivery | Implemented (early) | Authenticated Socket.IO session and conversation membership; reconnect supported; offline messages remain available in paginated history |
 | Per-user read states | Implemented (early) | Read position is persisted per account; conversation list provides unread counts |
-| Conversation search | Not implemented | Add server-backed message search |
+| Conversation search | Implemented (early) | Authenticated, rate-limited message search covers only conversations the account can still access; selecting a match opens its message context |
 | Communities, channels, roles, moderation | Not implemented | Data model and server-side authorization required |
 | Attachments and media storage | Not implemented | Safe upload validation, limits, scanning policy, and object storage required |
 | Voice, video, and screen sharing | Not implemented | Evaluate WebRTC/SFU architecture and platform support |

@@ -75,6 +75,7 @@ app.use(cors({ origin: allowedOrigins }))
 app.use(express.json({ limit: '32kb' }))
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false }))
 app.use('/api/users/search', rateLimit({ windowMs: 60_000, limit: 90, standardHeaders: 'draft-8', legacyHeaders: false }))
+app.use('/api/messages/search', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false }))
 app.use('/api/friend-requests', rateLimit({ windowMs: 60 * 60_000, limit: 40, standardHeaders: 'draft-8', legacyHeaders: false }))
 
 const createSession = db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
@@ -195,6 +196,29 @@ app.get('/api/users/search', requireAuth, (req: AuthRequest, res) => {
   return res.json({ users })
 })
 
+app.get('/api/messages/search', requireAuth, (req: AuthRequest, res) => {
+  const query = String(req.query.q ?? '').trim()
+  if (query.length < 2) return res.json({ messages: [] })
+  if (query.length > 100) return res.status(400).json({ error: 'A busca aceita até 100 caracteres.' })
+  const pattern = `%${query.replace(/[!%_]/g, '!$&')}%`
+  const messages = db.prepare(`SELECT m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
+    u.display_name AS author, m.body AS text, m.created_at AS createdAt,
+    CASE WHEN c.kind = 'direct' THEN (SELECT peer.display_name FROM conversation_members other
+      JOIN users peer ON peer.id = other.user_id WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1)
+      ELSE c.title END AS conversationName
+    FROM messages m JOIN conversations c ON c.id = m.conversation_id
+    JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = @me
+    JOIN users u ON u.id = m.author_id
+    WHERE m.body LIKE @pattern ESCAPE '!'
+      AND (c.kind <> 'direct' OR EXISTS (
+        SELECT 1 FROM conversation_members peer JOIN friendships f ON f.status = 'accepted'
+        AND ((f.requester_id = @me AND f.addressee_id = peer.user_id) OR (f.requester_id = peer.user_id AND f.addressee_id = @me))
+        WHERE peer.conversation_id = c.id AND peer.user_id <> @me
+      ))
+    ORDER BY m.created_at DESC, m.rowid DESC LIMIT 40`).all({ me: req.user!.id, pattern })
+  return res.json({ messages })
+})
+
 app.get('/api/friends', requireAuth, (req: AuthRequest, res) => {
   const friends = db.prepare(`SELECT u.id, u.username, u.display_name AS displayName, f.updated_at AS since
     FROM friendships f JOIN users u ON u.id = CASE WHEN f.requester_id = @me THEN f.addressee_id ELSE f.requester_id END
@@ -310,7 +334,21 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
       before = { createdAt: value.createdAt, rowid: Number(value.rowid) }
     } catch { return res.status(400).json({ error: 'Cursor de histórico inválido.' }) }
   }
-  const rows = before
+  let pivot: { createdAt: string; sequence: number } | undefined
+  if (req.query.around !== undefined) {
+    const targetId = String(req.query.around)
+    if (!/^[a-f0-9]{32}$/.test(targetId)) return res.status(400).json({ error: 'Mensagem de referência inválida.' })
+    pivot = db.prepare('SELECT created_at AS createdAt, rowid AS sequence FROM messages WHERE id = ? AND conversation_id = ?')
+      .get(targetId, req.params.id) as { createdAt: string; sequence: number } | undefined
+    if (!pivot) return res.status(404).json({ error: 'Mensagem não encontrada.' })
+  }
+  const rows = pivot
+    ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt
+        FROM messages m JOIN users u ON u.id = m.author_id
+        WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid <= ?))
+        ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, pivot.createdAt, pivot.createdAt, pivot.sequence, limit + 1) as (ApiMessageRow & { sequence: number })[]
+    : before
     ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
         u.display_name AS author, m.body AS text, m.created_at AS createdAt
         FROM messages m JOIN users u ON u.id = m.author_id

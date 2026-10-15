@@ -68,6 +68,16 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
       method: 'POST', body: JSON.stringify({ text: `Histórico ${index}` }),
     })
   }
+  const messageMatches = await request<{ messages: { id: string; conversationId: string; conversationName: string; text: string }[] }>('/messages/search?q=Hist%C3%B3rico%2023', bruno.token)
+  assert.equal(messageMatches.messages.length, 1)
+  assert.equal(messageMatches.messages[0].text, 'Histórico 23')
+  assert.equal(messageMatches.messages[0].conversationId, accepted.conversationId)
+  const aroundMatch = await request<{ messages: { id: string; text: string }[] }>(`/conversations/${accepted.conversationId}/messages?around=${messageMatches.messages[0].id}`, bruno.token)
+  assert.equal(aroundMatch.messages.at(-1)?.id, messageMatches.messages[0].id)
+  const unrelatedMatches = await request<{ messages: { id: string }[] }>('/messages/search?q=Hist%C3%B3rico', carla.token)
+  assert.equal(unrelatedMatches.messages.length, 0)
+  const wildcardMatches = await request<{ messages: { id: string }[] }>('/messages/search?q=%25%25', bruno.token)
+  assert.equal(wildcardMatches.messages.length, 0)
   const unread = await request<{ conversations: { id: string; unreadCount: number }[] }>('/conversations', bruno.token)
   assert.equal(unread.conversations.find(item => item.id === accepted.conversationId)?.unreadCount, 55)
   const firstPage = await request<{ messages: { text: string }[]; nextCursor: string | null }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
@@ -118,6 +128,8 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(revokedJoin.ok, false)
     const removedFriends = await request<{ friends: { id: string }[] }>('/friends', alice.token)
     assert.equal(removedFriends.friends.length, 0)
+    const revokedSearch = await request<{ messages: { id: string }[] }>('/messages/search?q=Hist%C3%B3rico%2023', bruno.token)
+    assert.equal(revokedSearch.messages.length, 0)
     const removedConversations = await request<{ conversations: { id: string }[] }>('/conversations', bruno.token)
     assert.ok(!removedConversations.conversations.some(item => item.id === accepted.conversationId))
   } finally {

@@ -1,6 +1,7 @@
 export type ProsaUser = { id: string; username: string; displayName: string }
 export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null; peerUsername: string | null; unreadCount: number }
 export type ApiMessage = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string }
+export type ApiMessageSearchResult = ApiMessage & { conversationName: string }
 export type ApiMessagePage = { messages: ApiMessage[]; nextCursor: string | null }
 export type ApiPerson = { id: string; userId?: string; username: string; displayName: string; relationship?: 'none' | 'incoming' | 'outgoing' | 'friend' }
 export type ApiFriendData = { friends: ApiPerson[]; incoming: ApiPerson[]; outgoing: ApiPerson[] }
@@ -40,6 +41,8 @@ export const api = {
   logout: async () => { try { await request('/auth/logout', { method: 'POST' }) } finally { localStorage.removeItem(tokenKey) } },
   conversations: () => request<{ conversations: ApiConversation[] }>('/conversations'),
   messages: (id: string, before?: string | null) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`),
+  messageContext: (id: string, messageId: string) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages?around=${encodeURIComponent(messageId)}`),
+  searchMessages: (query: string) => request<{ messages: ApiMessageSearchResult[] }>(`/messages/search?q=${encodeURIComponent(query)}`),
   markRead: (id: string) => request<{ lastReadRowId: number }>(`/conversations/${encodeURIComponent(id)}/read`, { method: 'POST' }),
   sendMessage: (id: string, text: string) => request<{ message: ApiMessage }>(`/conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) }),
   searchUsers: (query: string) => request<{ users: ApiPerson[] }>(`/users/search?q=${encodeURIComponent(query)}`),

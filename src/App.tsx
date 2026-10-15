@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import './App.css'
-import { api, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiPerson, type ProsaUser } from './api'
+import { api, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiMessageSearchResult, type ApiPerson, type ProsaUser } from './api'
 import { io } from 'socket.io-client'
 
 type Message = { id: string; author: string; time: string; text: string; mine?: boolean }
@@ -38,6 +38,7 @@ function App() {
   const [chats, setChats] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState('')
   const [query, setQuery] = useState('')
+  const [searchResults, setSearchResults] = useState<{ query: string; userId: string; messages: ApiMessageSearchResult[] } | null>(null)
   const [draft, setDraft] = useState('')
   const [notice, setNotice] = useState('')
   const [user, setUser] = useState<ProsaUser | null>(null)
@@ -60,6 +61,7 @@ function App() {
   const preserveScrollRef = useRef<{ height: number; top: number } | null>(null)
   const nearBottomRef = useRef(true)
   const renderedMessageCountRef = useRef(0)
+  const pendingMessageIdRef = useRef<string | null>(null)
   const filtered = useMemo(() => chats.filter(chat => `${chat.name} ${chat.handle}`.toLowerCase().includes(query.toLowerCase())), [chats, query])
 
   useEffect(() => { chatsRef.current = chats }, [chats])
@@ -67,7 +69,11 @@ function App() {
   useLayoutEffect(() => {
     const scroller = messageScrollRef.current
     if (!scroller) return
-    if (preserveScrollRef.current) {
+    if (pendingMessageIdRef.current) {
+      const target = scroller.querySelector(`[data-message-id="${pendingMessageIdRef.current}"]`)
+      target?.scrollIntoView({ block: 'center' })
+      pendingMessageIdRef.current = null
+    } else if (preserveScrollRef.current) {
       const previous = preserveScrollRef.current
       scroller.scrollTop = previous.top + scroller.scrollHeight - previous.height
       preserveScrollRef.current = null
@@ -100,6 +106,17 @@ function App() {
     }, 180)
     return () => { active = false; window.clearTimeout(timer) }
   }, [peopleQuery, user])
+
+  useEffect(() => {
+    const term = query.trim()
+    if (!user || activeView !== 'messages' || term.length < 2) return
+    let current = true
+    const timer = window.setTimeout(() => {
+      api.searchMessages(term).then(result => { if (current) setSearchResults({ query: term, userId: user.id, messages: result.messages }) })
+        .catch(error => { if (current) setNotice(error instanceof Error ? error.message : 'A busca falhou.') })
+    }, 250)
+    return () => { current = false; window.clearTimeout(timer) }
+  }, [query, activeView, user])
 
   useEffect(() => {
     let mounted = true
@@ -204,21 +221,22 @@ function App() {
     } catch (error) { setNotice(error instanceof Error ? error.message : 'A mensagem não foi enviada.') }
   }
 
-  async function openConversation(id: string) {
+  async function openConversation(id: string, targetMessageId?: string) {
     setActiveView('messages')
     setActiveId(id)
     setNotice('')
     if (!user) return
     try {
-      const page = await api.messages(id)
+      const page = targetMessageId ? await api.messageContext(id, targetMessageId) : await api.messages(id)
       await api.markRead(id)
+      pendingMessageIdRef.current = targetMessageId ?? null
       setChats(current => current.map(chat => chat.id === id ? {
         ...chat,
         messages: page.messages.map(message => fromApiMessage(message, user)),
         olderCursor: page.nextCursor,
         unreadCount: 0,
-        preview: page.messages.at(-1)?.text ?? chat.preview,
-        time: page.messages.at(-1) ? localTime(page.messages.at(-1)!.createdAt) : chat.time,
+        preview: targetMessageId ? chat.preview : page.messages.at(-1)?.text ?? chat.preview,
+        time: targetMessageId ? chat.time : page.messages.at(-1) ? localTime(page.messages.at(-1)!.createdAt) : chat.time,
       } : chat))
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível abrir essa conversa.') }
   }
@@ -257,12 +275,13 @@ function App() {
 
     <aside className="sidebar">
       <header className="sidebar-heading"><div><p className="eyebrow">{user.displayName.toLocaleUpperCase('pt-BR')}</p><h1>{activeView === 'friends' ? 'Contatos' : 'Mensagens'}</h1></div><button className="icon-button new-chat" aria-label="Adicionar contato" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}><Icon name="plus" size={18} /></button></header>
-      <label className="search-box"><Icon name="search" size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={activeView === 'friends' ? 'Buscar contatos' : 'Buscar conversas'} /><kbd>⌘ K</kbd></label>
+      <label className="search-box"><Icon name="search" size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={activeView === 'friends' ? 'Buscar contatos' : 'Buscar conversas e mensagens'} /><kbd>⌘ K</kbd></label>
       <nav className="tabs" aria-label="Navegação">{[{ id: 'messages', label: 'Mensagens' }, { id: 'friends', label: 'Contatos' }].map(item => <button key={item.id} className={`tab ${activeView === item.id ? 'active' : ''}`} onClick={() => setActiveView(item.id as 'messages' | 'friends')}>{item.label}{item.id === 'friends' && people.incoming.length > 0 && <span className="tab-count">{people.incoming.length}</span>}</button>)}</nav>
-      <div className="section-label"><span>{activeView === 'friends' ? 'CONECTADOS' : 'RECENTES'}</span><button aria-label="Atualizar lista" onClick={() => void (activeView === 'friends' ? refreshPeople() : refreshConversations())}><Icon name="more" size={17} /></button></div>
+      <div className="section-label"><span>{activeView === 'friends' ? 'CONECTADOS' : query.trim().length >= 2 ? 'CONVERSAS' : 'RECENTES'}</span><button aria-label="Atualizar lista" onClick={() => void (activeView === 'friends' ? refreshPeople() : refreshConversations())}><Icon name="more" size={17} /></button></div>
       <div className="conversation-list">{activeView === 'messages' ? filtered.map(chat => <button key={chat.id} className={`conversation ${activeId === chat.id ? 'active' : ''}`} onClick={() => void openConversation(chat.id)}>
         <span className={`avatar ${chat.color}`}>{chat.initials}{chat.online && <i />}</span><span className="conversation-copy"><span className="conversation-top"><strong>{chat.name}</strong><time>{chat.time}</time></span><span className="conversation-bottom"><span>{chat.preview}</span>{chat.unreadCount > 0 && <i className="unread-dot" title={`${chat.unreadCount} mensagens não lidas`} />}</span></span>
       </button>) : people.friends.filter(person => `${person.displayName} ${person.username}`.toLowerCase().includes(query.toLowerCase())).map(person => <button key={person.id} className={`conversation ${activeId === chats.find(chat => chat.handle === `@${person.username}`)?.id ? 'active' : ''}`} onClick={() => { const conversation = chats.find(chat => chat.handle === `@${person.username}`); if (conversation) void openConversation(conversation.id) }}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><span className="conversation-copy"><span className="conversation-top"><strong>{person.displayName}</strong></span><span className="conversation-bottom"><span>@{person.username}</span></span></span></button>)}</div>
+      {activeView === 'messages' && query.trim().length >= 2 && <div className="search-results" aria-live="polite"><div className="search-results-title">MENSAGENS</div>{!searchResults || searchResults.query !== query.trim() || searchResults.userId !== user.id ? <p className="empty-search">Buscando mensagens…</p> : searchResults.messages.length ? searchResults.messages.map(result => <button className="search-result" key={result.id} onClick={() => void openConversation(result.conversationId, result.id)}><span className="search-result-top"><strong>{result.conversationName}</strong><time>{localTime(result.createdAt)}</time></span><span className="search-result-text">{result.author}: {result.text}</span></button>) : <p className="empty-search">Nenhuma mensagem encontrada.</p>}</div>}
       <div className="sidebar-bottom"><div className="sync-mark"><span /> Sessão ativa · @{user.username}</div></div>
     </aside>
 
@@ -272,7 +291,7 @@ function App() {
       <div className="message-scroll" ref={messageScrollRef} onScroll={event => { const element = event.currentTarget; nearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}><div className="day-divider"><span>HISTÓRICO</span></div>{active.olderCursor && <button className="load-older" disabled={loadingOlder} onClick={() => void loadOlderMessages()}>{loadingOlder ? 'Carregando…' : 'Carregar mensagens anteriores'}</button>}<div className="messages">{active.messages.map((message, index) => {
         const previous = active.messages[index - 1]
         const grouped = previous?.author === message.author
-        return <article key={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}<p>{message.text}</p></div></article>
+        return <article key={message.id} data-message-id={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}<p>{message.text}</p></div></article>
       })}</div></div>
       <form className="composer" onSubmit={sendMessage}><button type="button" className="composer-tool attach" aria-label="Anexar arquivo" onClick={() => setNotice('O envio de arquivos será ativado com o armazenamento do Prosa.')}><Icon name="paperclip" size={19} /></button><input aria-label="Escrever mensagem" value={draft} onChange={event => setDraft(event.target.value)} placeholder={`Escreva para ${active.name.split(' ')[0]}...`} /><button type="button" className="composer-tool" aria-label="Emoji" onClick={() => setDraft(value => `${value} ✨`)}><Icon name="smile" size={19} /></button><button type="submit" className="send-button" aria-label="Enviar mensagem" disabled={!draft.trim()}><Icon name="send" size={17} /></button></form>
       <footer className="chat-footnote">Mensagens salvas no banco local do Prosa.</footer></> : <div className="empty-chat"><span className="auth-brand">p</span><h2>Seu Prosa está pronto.</h2><p>Encontre pessoas pelo nome de usuário para começar uma conversa.</p><button className="auth-submit" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Encontrar pessoas</button></div>}
