@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import './App.css'
 import { AccountDataControls } from './AccountDataControls'
-import { api, type ApiCommunity, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiMessageSearchResult, type ApiPerson, type ApiPin, type ApiSession, type ProsaUser } from './api'
+import { api, type ApiCommunity, type ApiCommunityMember, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiMessageSearchResult, type ApiPerson, type ApiPin, type ApiSession, type ProsaUser } from './api'
 import { io } from 'socket.io-client'
 
 type Message = { id: string; author: string; time: string; text: string; mine?: boolean; edited?: boolean; deleted?: boolean; pinned?: boolean; replyTo?: { id: string; author: string; text: string; deleted: boolean } | null; reactions?: { emoji: string; count: number; reactedByMe: boolean }[] }
@@ -58,6 +58,8 @@ function App() {
   const [communityNameDraft, setCommunityNameDraft] = useState('')
   const [inviteCodeDraft, setInviteCodeDraft] = useState('')
   const [channelNameDraft, setChannelNameDraft] = useState('')
+  const [communityMembers, setCommunityMembers] = useState<ApiCommunityMember[]>([])
+  const [communityRenameDraft, setCommunityRenameDraft] = useState('')
   const [communityPickerId, setCommunityPickerId] = useState('')
   const [sessions, setSessions] = useState<ApiSession[]>([])
   const [loadingSessions, setLoadingSessions] = useState(false)
@@ -326,6 +328,47 @@ function App() {
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível criar o canal.') }
   }
 
+  async function refreshCommunityMembers(communityId: string) {
+    try { const result = await api.communityMembers(communityId); setCommunityMembers(result.members) }
+    catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível carregar participantes.') }
+  }
+
+  async function renameSelectedCommunity(event: FormEvent) {
+    event.preventDefault()
+    if (!selectedCommunity) return
+    try {
+      await api.renameCommunity(selectedCommunity.id, communityRenameDraft)
+      setCommunityRenameDraft('')
+      await refreshCommunities()
+      setNotice('Comunidade renomeada.')
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível renomear a comunidade.') }
+  }
+
+  async function deleteSelectedCommunity() {
+    if (!selectedCommunity || selectedCommunity.role !== 'owner') return
+    if (!window.confirm(`Excluir “${selectedCommunity.name}” e todos os seus canais? Essa ação não pode ser desfeita.`)) return
+    try {
+      await api.deleteCommunity(selectedCommunity.id)
+      setCommunityMembers([])
+      await refreshCommunities()
+      await refreshConversations(user!)
+      setNotice('Comunidade excluída.')
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível excluir a comunidade.') }
+  }
+
+  async function changeCommunityRole(member: ApiCommunityMember) {
+    if (!selectedCommunity) return
+    const role = member.role === 'admin' ? 'member' : 'admin'
+    try { await api.setCommunityMemberRole(selectedCommunity.id, member.id, role); await refreshCommunityMembers(selectedCommunity.id); await refreshCommunities() }
+    catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível alterar o cargo.') }
+  }
+
+  async function removeCommunityMember(member: ApiCommunityMember) {
+    if (!selectedCommunity) return
+    try { await api.removeCommunityMember(selectedCommunity.id, member.id); await refreshCommunityMembers(selectedCommunity.id); await refreshCommunities(); await refreshConversations(user!) }
+    catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível remover o participante.') }
+  }
+
   async function sendFriendRequest(person: ApiPerson) {
     try {
       const result = await api.requestFriend(person.username)
@@ -478,11 +521,14 @@ function App() {
       <section className="people-section"><form className="community-form" onSubmit={createCommunity}><div><h3>Criar comunidade</h3><p>Reúna pessoas em canais organizados por assunto.</p></div><label>Nome da comunidade<input autoComplete="off" required minLength={2} maxLength={48} value={communityNameDraft} onChange={event => setCommunityNameDraft(event.target.value)} placeholder="ex.: Clube de leitura" /></label><button className="person-action primary">Criar</button></form></section>
       <section className="people-section"><form className="community-form join-community" onSubmit={joinCommunity}><div><h3>Entrar com convite</h3><p>Use um código compartilhado por quem administra a comunidade.</p></div><label>Código de convite<input autoComplete="off" required minLength={10} maxLength={32} value={inviteCodeDraft} onChange={event => setInviteCodeDraft(event.target.value)} placeholder="Cole o código de convite" /></label><button className="person-action primary">Entrar</button></form></section>
       <section className="people-section"><h3>Suas comunidades <span>{communities.length}</span></h3>{communities.length ? communities.map(community => <article className={`community-card ${selectedCommunity?.id === community.id ? 'selected' : ''}`} key={community.id}>
-        <button className="community-card-heading" onClick={() => { setSelectedCommunityId(community.id); setCommunityPickerId(community.id) }}><span className="avatar violet">{community.name.slice(0, 1).toLocaleUpperCase('pt-BR')}</span><span className="person-info"><strong>{community.name}</strong><span>{community.memberCount} participantes · {community.role === 'owner' ? 'responsável' : 'participante'}</span></span></button>
+        <button className="community-card-heading" onClick={() => { setSelectedCommunityId(community.id); setCommunityPickerId(community.id); void refreshCommunityMembers(community.id) }}><span className="avatar violet">{community.name.slice(0, 1).toLocaleUpperCase('pt-BR')}</span><span className="person-info"><strong>{community.name}</strong><span>{community.memberCount} participantes · {community.role === 'owner' ? 'responsável' : community.role === 'admin' ? 'administrador' : 'participante'}</span></span></button>
         {community.inviteCode && <div className="invite-code-row"><span>Código para convidar</span><code>{community.inviteCode}</code></div>}
         {community.channels.map(channel => <button className="community-channel-item" key={channel.id} onClick={() => { setSelectedCommunityId(community.id); void openConversation(channel.conversationId) }}><span>#</span>{channel.name}<small>Abrir canal</small></button>)}
       </article>) : <p className="empty-people">Crie uma comunidade ou entre com um convite para começar.</p>}</section>
       {selectedCommunity && (selectedCommunity.role === 'owner' || selectedCommunity.role === 'admin') && <section className="people-section"><form className="community-form add-channel" onSubmit={createChannel}><div><h3>Novo canal em {selectedCommunity.name}</h3><p>Use letras, números ou hífens, de 2 a 32 caracteres.</p></div><label>Nome do canal<input autoComplete="off" required minLength={2} maxLength={32} value={channelNameDraft} onChange={event => setChannelNameDraft(event.target.value)} placeholder="ex.: novidades" /></label><button className="person-action primary">Criar canal</button></form></section>}
+      {selectedCommunity && <section className="people-section"><h3>Participantes <span>{communityMembers.length || selectedCommunity.memberCount}</span></h3>{communityMembers.map(member => <article className="person-row" key={member.id}><span className="avatar blue">{member.displayName.slice(0,1).toLocaleUpperCase('pt-BR')}</span><div className="person-info"><strong>{member.displayName}</strong><span>@{member.username} · {member.role === 'owner' ? 'responsável' : member.role === 'admin' ? 'administrador' : 'participante'}</span></div>{selectedCommunity.role === 'owner' && member.role !== 'owner' && <><button className="person-action" onClick={() => void changeCommunityRole(member)}>{member.role === 'admin' ? 'Remover admin' : 'Promover admin'}</button><button className="person-action" onClick={() => void removeCommunityMember(member)}>Remover</button></>}{selectedCommunity.role === 'admin' && member.role === 'member' && <button className="person-action" onClick={() => void removeCommunityMember(member)}>Remover</button>}</article>)}</section>}
+      {selectedCommunity?.role === 'owner' && <section className="people-section"><form className="community-form" onSubmit={renameSelectedCommunity}><div><h3>Configurações</h3><p>Altere o nome exibido nos espaços de participantes.</p></div><label>Novo nome<input autoComplete="off" required minLength={2} maxLength={48} value={communityRenameDraft} onChange={event => setCommunityRenameDraft(event.target.value)} placeholder={selectedCommunity.name} /></label><button className="person-action primary">Salvar nome</button></form><button className="person-action danger community-delete" onClick={() => void deleteSelectedCommunity()}>Excluir comunidade e canais</button></section>}
+      {selectedCommunity && selectedCommunity.role !== 'owner' && <section className="people-section"><button className="person-action danger" onClick={() => { if (user) void removeCommunityMember({ id: user.id, username: user.username, displayName: user.displayName, role: 'member', joinedAt: '' }) }}>Sair da comunidade</button></section>}
     </div></div>
   }
 

@@ -9,6 +9,7 @@ export type ApiPin = { id: string; conversationId: string; authorId: string; aut
 export type ApiMessageSearchResult = ApiMessage & { conversationName: string }
 export type ApiCommunityChannel = { id: string; conversationId: string; name: string; position?: number }
 export type ApiCommunity = { id: string; name: string; inviteCode: string | null; role: 'owner' | 'admin' | 'member'; memberCount: number; channels: ApiCommunityChannel[] }
+export type ApiCommunityMember = { id: string; username: string; displayName: string; role: 'owner' | 'admin' | 'member'; joinedAt: string }
 export type ApiMessagePage = { messages: ApiMessage[]; nextCursor: string | null }
 export type ApiSession = { id: string; label: string; createdAt: number; lastSeenAt: number; expiresAt: number; current: number }
 export type ApiPerson = { id: string; userId?: string; username: string; displayName: string; relationship?: 'none' | 'incoming' | 'outgoing' | 'friend' }
@@ -100,6 +101,11 @@ export const api = {
   createCommunity: (name: string) => request<{ community: ApiCommunity }>('/communities', { method: 'POST', body: JSON.stringify({ name }) }),
   joinCommunity: (inviteCode: string) => request<{ communityId: string }>('/communities/join', { method: 'POST', body: JSON.stringify({ inviteCode }) }),
   createCommunityChannel: (communityId: string, name: string) => request<{ channel: ApiCommunityChannel }>(`/communities/${encodeURIComponent(communityId)}/channels`, { method: 'POST', body: JSON.stringify({ name }) }),
+  communityMembers: (communityId: string) => request<{ members: ApiCommunityMember[] }>(`/communities/${encodeURIComponent(communityId)}/members`),
+  setCommunityMemberRole: (communityId: string, userId: string, role: 'admin' | 'member') => request<{ communityId: string; userId: string; role: string }>(`/communities/${encodeURIComponent(communityId)}/members/${encodeURIComponent(userId)}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),
+  removeCommunityMember: (communityId: string, userId: string) => request<void>(`/communities/${encodeURIComponent(communityId)}/members/${encodeURIComponent(userId)}`, { method: 'DELETE' }),
+  renameCommunity: (communityId: string, name: string) => request<{ id: string; name: string }>(`/communities/${encodeURIComponent(communityId)}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  deleteCommunity: (communityId: string) => request<void>(`/communities/${encodeURIComponent(communityId)}`, { method: 'DELETE' }),
   messages: (id: string, before?: string | null) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`),
   messageContext: (id: string, messageId: string) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages?around=${encodeURIComponent(messageId)}`),
   searchMessages: (query: string) => request<{ messages: ApiMessageSearchResult[] }>(`/messages/search?q=${encodeURIComponent(query)}`),

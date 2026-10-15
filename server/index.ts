@@ -513,6 +513,84 @@ app.post('/api/communities/:id/channels', requireAuth, (req: AuthRequest, res) =
   return res.status(201).json({ channel: { id: channelId, conversationId, name } })
 })
 
+app.patch('/api/communities/:id', requireAuth, (req: AuthRequest, res) => {
+  const community = db.prepare('SELECT owner_id AS ownerId FROM communities WHERE id = ?').get(req.params.id) as { ownerId: string } | undefined
+  if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  if (community.ownerId !== req.user!.id) return res.status(403).json({ error: 'Somente o responsável pode renomear a comunidade.' })
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : ''
+  if (name.length < 2 || name.length > 48) return res.status(400).json({ error: 'O nome da comunidade deve ter entre 2 e 48 caracteres.' })
+  db.prepare('UPDATE communities SET name = ? WHERE id = ?').run(name, req.params.id)
+  const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(req.params.id) as { userId: string }[]
+  for (const member of members) io.to(`user:${member.userId}`).emit('communities:changed')
+  return res.json({ id: req.params.id, name })
+})
+
+app.delete('/api/communities/:id', requireAuth, (req: AuthRequest, res) => {
+  const community = db.prepare('SELECT owner_id AS ownerId FROM communities WHERE id = ?').get(req.params.id) as { ownerId: string } | undefined
+  if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  if (community.ownerId !== req.user!.id) return res.status(403).json({ error: 'Somente o responsável pode excluir a comunidade.' })
+  const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(req.params.id) as { userId: string }[]
+  const removeCommunity = db.transaction(() => {
+    db.prepare('DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM community_channels WHERE community_id = ?)').run(req.params.id)
+    db.prepare('DELETE FROM communities WHERE id = ?').run(req.params.id)
+  })
+  removeCommunity()
+  for (const member of members) {
+    io.to(`user:${member.userId}`).emit('communities:changed')
+    io.to(`user:${member.userId}`).emit('conversations:changed')
+  }
+  return res.status(204).end()
+})
+
+app.get('/api/communities/:id/members', requireAuth, (req: AuthRequest, res) => {
+  const membership = db.prepare('SELECT role FROM community_members WHERE community_id = ? AND user_id = ?').get(req.params.id, req.user!.id)
+  if (!membership) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  const members = db.prepare(`SELECT cm.user_id AS id, u.username, u.display_name AS displayName, cm.role, cm.joined_at AS joinedAt
+    FROM community_members cm JOIN users u ON u.id = cm.user_id WHERE cm.community_id = ?
+    ORDER BY CASE cm.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, cm.joined_at, u.username`).all(req.params.id)
+  return res.json({ members })
+})
+
+app.put('/api/communities/:id/members/:userId/role', requireAuth, (req: AuthRequest, res) => {
+  const { id, userId } = req.params
+  const community = db.prepare('SELECT owner_id AS ownerId FROM communities WHERE id = ?').get(id) as { ownerId: string } | undefined
+  if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  if (community.ownerId !== req.user!.id) return res.status(403).json({ error: 'Somente o responsável pode gerenciar cargos.' })
+  if (userId === community.ownerId) return res.status(400).json({ error: 'O responsável não pode alterar o próprio cargo.' })
+  const role = req.body?.role
+  if (role !== 'admin' && role !== 'member') return res.status(400).json({ error: 'Cargo inválido.' })
+  const result = db.prepare('UPDATE community_members SET role = ? WHERE community_id = ? AND user_id = ?').run(role, id, userId)
+  if (!result.changes) return res.status(404).json({ error: 'Participante não encontrado.' })
+  const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(id) as { userId: string }[]
+  for (const member of members) io.to(`user:${member.userId}`).emit('communities:changed')
+  return res.json({ communityId: id, userId, role })
+})
+
+app.delete('/api/communities/:id/members/:userId', requireAuth, (req: AuthRequest, res) => {
+  const { id, userId } = req.params
+  const community = db.prepare('SELECT owner_id AS ownerId FROM communities WHERE id = ?').get(id) as { ownerId: string } | undefined
+  if (!community) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  const membership = db.prepare('SELECT role FROM community_members WHERE community_id = ? AND user_id = ?').get(id, req.user!.id) as { role: string } | undefined
+  if (!membership) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  if (userId === community.ownerId) return res.status(400).json({ error: 'Transfira a responsabilidade antes de sair ou remover este participante.' })
+  const target = db.prepare('SELECT role FROM community_members WHERE community_id = ? AND user_id = ?').get(id, userId) as { role: string } | undefined
+  if (!target) return res.status(404).json({ error: 'Participante não encontrado.' })
+  const self = userId === req.user!.id
+  if (!self && community.ownerId !== req.user!.id && membership.role !== 'admin') return res.status(403).json({ error: 'Você não pode remover participantes.' })
+  if (!self && membership.role === 'admin' && target.role !== 'member') return res.status(403).json({ error: 'Administradores só podem remover participantes.' })
+  const removeMember = db.transaction(() => {
+    db.prepare('DELETE FROM community_members WHERE community_id = ? AND user_id = ?').run(id, userId)
+    db.prepare('DELETE FROM conversation_members WHERE user_id = ? AND conversation_id IN (SELECT conversation_id FROM community_channels WHERE community_id = ?)').run(userId, id)
+  })
+  removeMember()
+  const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(id) as { userId: string }[]
+  for (const member of [...members, { userId }]) {
+    io.to(`user:${member.userId}`).emit('communities:changed')
+    io.to(`user:${member.userId}`).emit('conversations:changed')
+  }
+  return res.status(204).end()
+})
+
 app.get('/api/users/search', requireAuth, (req: AuthRequest, res) => {
   const query = String(req.query.q ?? '').trim().replace(/^@/, '').toLowerCase()
   if (query.length < 2) return res.json({ users: [] })
