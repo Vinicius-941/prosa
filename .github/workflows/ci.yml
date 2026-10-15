@@ -53,8 +53,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run lint
-      - run: npm run build
-      - run: npm run build:service
+      - run: npm run build:desktop
       - if: matrix.os == 'ubuntu-latest'
         run: npx playwright install --with-deps chromium
       - if: matrix.os == 'ubuntu-latest'
@@ -62,6 +61,18 @@ jobs:
       - if: matrix.os == 'ubuntu-latest'
         run: npm run benchmark:service -- --messages=100 --concurrency=5
       - run: npx electron-builder --dir --${{ matrix.package }} --publish never
+      - if: matrix.os == 'ubuntu-latest'
+        name: Linux desktop launch smoke
+        env:
+          PROSA_SMOKE_SCREENSHOT: ${{ runner.temp }}/prosa-linux-desktop.png
+          PROSA_SMOKE_SETTINGS_SCREENSHOT: ${{ runner.temp }}/prosa-linux-settings.png
+        run: xvfb-run -a node tests/desktop-smoke.mjs artifacts/linux-unpacked/prosa
+      - if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v6
+        with:
+          name: prosa-linux-desktop-smoke
+          path: ${{ runner.temp }}/prosa-linux-*.png
+          if-no-files-found: error
 
   service-container:
     name: Service container · health check
