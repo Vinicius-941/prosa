@@ -253,8 +253,32 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(reply.message.replyTo.author, 'Alice Aurora')
     assert.equal((await liveReply).replyTo.text, 'Mensagem em tempo real')
 
-    const history = await request<{ messages: { id: string; text: string }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+    const livePin = new Promise<{ messageId: string; conversationId: string; pinned: boolean }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for a pin update')), 3000)
+      brunoSocket.once('message:pinned', event => { clearTimeout(timeout); resolve(event) })
+    })
+    const pinned = await request<{ messageId: string; pinned: boolean }>(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/pin`, alice.token, {
+      method: 'PUT', body: JSON.stringify({ pinned: true }),
+    })
+    assert.equal(pinned.pinned, true)
+    assert.equal((await livePin).messageId, sent.message.id)
+    const pinnedHistory = await request<{ messages: { id: string; pinned: boolean }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+    assert.equal(pinnedHistory.messages.find(message => message.id === sent.message.id)?.pinned, 1)
+    const pins = await request<{ pins: { id: string; text: string; pinnedBy: string }[] }>(`/conversations/${accepted.conversationId}/pins`, bruno.token)
+    assert.equal(pins.pins[0].id, sent.message.id)
+    assert.equal(pins.pins[0].pinnedBy, alice.user.id)
+    const outsiderPins = await sendHttp(`/conversations/${accepted.conversationId}/pins`, carla.token)
+    assert.equal(outsiderPins.status, 404)
+    const removedPinLive = new Promise<{ messageId: string; pinned: boolean }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for an unpin update')), 3000)
+      brunoSocket.once('message:pinned', event => { clearTimeout(timeout); resolve(event) })
+    })
+    await request(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/pin`, alice.token, { method: 'PUT', body: JSON.stringify({ pinned: false }) })
+    assert.equal((await removedPinLive).pinned, false)
+
+    const history = await request<{ messages: { id: string; text: string; pinned: boolean }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
     assert.equal(history.messages.find(message => message.id === sent.message.id)?.text, sent.message.text)
+    assert.equal(history.messages.find(message => message.id === sent.message.id)?.pinned, 0)
 
     const forbiddenEdit = await fetch(`${origin}/api/conversations/${accepted.conversationId}/messages/${sent.message.id}`, {
       method: 'PATCH', headers: { authorization: `Bearer ${bruno.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Alteração indevida' }),
@@ -294,6 +318,7 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     })
     assert.equal(replyToRemovedMessage.status, 409)
     assert.equal((db.prepare('SELECT COUNT(*) AS count FROM message_reactions WHERE message_id = ?').get(sent.message.id) as { count: number }).count, 0)
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM message_pins WHERE message_id = ?').get(sent.message.id) as { count: number }).count, 0)
     const reactToDeleted = await sendHttp(`/conversations/${accepted.conversationId}/messages/${sent.message.id}/reactions`, bruno.token, {
       method: 'PUT', body: JSON.stringify({ emoji: '👍' }),
     })

@@ -64,6 +64,13 @@ db.exec(`
     reply_to TEXT REFERENCES messages(id) ON DELETE SET NULL
   );
   CREATE INDEX IF NOT EXISTS messages_conversation_created ON messages(conversation_id, created_at);
+  CREATE TABLE IF NOT EXISTS message_pins (
+    message_id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    pinned_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    pinned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS message_pins_conversation_time ON message_pins(conversation_id, pinned_at DESC);
   CREATE TABLE IF NOT EXISTS conversation_reads (
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -669,18 +676,18 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
   }
   const rows = pivot
     ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
         FROM messages m JOIN users u ON u.id = m.author_id
         WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid <= ?))
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, pivot.createdAt, pivot.createdAt, pivot.sequence, limit + 1) as (ApiMessageRow & { sequence: number })[]
     : before
     ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
         FROM messages m JOIN users u ON u.id = m.author_id
         WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < ?))
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, before.createdAt, before.createdAt, before.rowid, limit + 1) as (ApiMessageRow & { sequence: number })[]
     : db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt, m.reply_to AS replyToId, EXISTS (SELECT 1 FROM message_pins p WHERE p.message_id = m.id) AS pinned
         FROM messages m JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ?
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, limit + 1) as (ApiMessageRow & { sequence: number })[]
   const hasOlder = rows.length > limit
@@ -721,7 +728,7 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
   return res.json({ messages, nextCursor })
 })
 
-type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null; replyToId?: string | null }
+type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null; replyToId?: string | null; pinned: number }
 
 app.post('/api/conversations/:id/read', requireAuth, (req: AuthRequest, res) => {
   if (!canAccessConversation(req.params.id, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
@@ -731,6 +738,35 @@ app.post('/api/conversations/:id/read', requireAuth, (req: AuthRequest, res) => 
     last_read_rowid = MAX(conversation_reads.last_read_rowid, excluded.last_read_rowid), updated_at = CURRENT_TIMESTAMP`)
     .run(req.params.id, req.user!.id, latest.rowid)
   return res.json({ lastReadRowId: latest.rowid })
+})
+
+app.get('/api/conversations/:conversationId/pins', requireAuth, (req: AuthRequest, res) => {
+  const { conversationId } = req.params
+  if (!canAccessConversation(conversationId, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
+  const pins = db.prepare(`SELECT m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
+    u.display_name AS author, m.body AS text, m.created_at AS createdAt, p.pinned_at AS pinnedAt,
+    p.pinned_by AS pinnedBy FROM message_pins p JOIN messages m ON m.id = p.message_id
+    JOIN users u ON u.id = m.author_id WHERE p.conversation_id = ? ORDER BY p.pinned_at DESC LIMIT 100`)
+    .all(conversationId)
+  return res.json({ pins })
+})
+
+app.put('/api/conversations/:conversationId/messages/:messageId/pin', requireAuth, (req: AuthRequest, res) => {
+  const { conversationId, messageId } = req.params
+  if (!canAccessConversation(conversationId, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
+  const message = db.prepare('SELECT deleted_at AS deletedAt FROM messages WHERE id = ? AND conversation_id = ?').get(messageId, conversationId) as { deletedAt: string | null } | undefined
+  if (!message) return res.status(404).json({ error: 'Mensagem não encontrada.' })
+  if (message.deletedAt) return res.status(409).json({ error: 'Não é possível fixar uma mensagem removida.' })
+  if (req.body?.pinned === true) {
+    db.prepare('INSERT INTO message_pins (message_id, conversation_id, pinned_by) VALUES (?, ?, ?) ON CONFLICT(message_id) DO NOTHING').run(messageId, conversationId, req.user!.id)
+  } else if (req.body?.pinned === false) {
+    db.prepare('DELETE FROM message_pins WHERE message_id = ? AND conversation_id = ?').run(messageId, conversationId)
+  } else return res.status(400).json({ error: 'Informe se a mensagem deve ficar fixada.' })
+  const pinned = Boolean(db.prepare('SELECT 1 FROM message_pins WHERE message_id = ?').get(messageId))
+  const event = { messageId, conversationId, pinned }
+  const recipients = db.prepare('SELECT user_id AS userId FROM conversation_members WHERE conversation_id = ?').all(conversationId) as { userId: string }[]
+  for (const recipient of recipients) io.to(`user:${recipient.userId}`).emit('message:pinned', event)
+  return res.json(event)
 })
 
 app.post('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) => {
@@ -812,7 +848,10 @@ app.delete('/api/conversations/:conversationId/messages/:messageId', requireAuth
   const deletedAt = new Date().toISOString()
   const deleteMessage = db.transaction(() => {
     const result = db.prepare("UPDATE messages SET body = '', deleted_at = ? WHERE id = ? AND author_id = ? AND deleted_at IS NULL").run(deletedAt, messageId, req.user!.id)
-    if (result.changes) db.prepare('DELETE FROM message_reactions WHERE message_id = ?').run(messageId)
+    if (result.changes) {
+      db.prepare('DELETE FROM message_reactions WHERE message_id = ?').run(messageId)
+      db.prepare('DELETE FROM message_pins WHERE message_id = ?').run(messageId)
+    }
     return result
   })
   const deleteResult = deleteMessage()
