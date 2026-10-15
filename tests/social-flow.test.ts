@@ -1,0 +1,112 @@
+import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+import test from 'node:test'
+import Database from 'better-sqlite3'
+import { io as connectSocket } from 'socket.io-client'
+
+process.env.PROSA_NO_LISTEN = '1'
+process.env.PROSA_DATA_DIR = mkdtempSync(path.join(tmpdir(), 'prosa-social-'))
+const legacyDb = new Database(path.join(process.env.PROSA_DATA_DIR, 'prosa.sqlite'))
+legacyDb.exec("CREATE TABLE conversations (id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
+legacyDb.close()
+
+const { db, httpServer, io } = await import('../server/index.ts')
+
+type Account = { token: string; user: { id: string; username: string; displayName: string } }
+
+test('two accounts connect, exchange persisted live messages, and unrelated accounts are denied', async () => {
+  await new Promise<void>(resolve => httpServer.listen(0, resolve))
+  const address = httpServer.address()
+  assert.ok(address && typeof address !== 'string')
+  const origin = `http://127.0.0.1:${address.port}`
+  const base = `${origin}/api`
+  const tag = Math.random().toString(36).slice(2, 10)
+
+  async function request<T>(route: string, token?: string, init: RequestInit = {}): Promise<T> {
+    const response = await fetch(`${base}${route}`, {
+      ...init,
+      headers: { ...(init.body ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}), ...init.headers },
+    })
+    if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`)
+    return response.status === 204 ? undefined as T : response.json() as Promise<T>
+  }
+
+  async function register(prefix: string, displayName: string): Promise<Account> {
+    return request<Account>('/auth/register', undefined, {
+      method: 'POST',
+      body: JSON.stringify({ username: `${prefix}_${tag}`, displayName, password: 'SenhaDeIntegracao!2026' }),
+    })
+  }
+
+  const alice = await register('alice', 'Alice Aurora')
+  const bruno = await register('bruno', 'Bruno Bairro')
+  const carla = await register('carla', 'Carla Costa')
+
+  const search = await request<{ users: { username: string }[] }>(`/users/search?q=${bruno.user.username}`, alice.token)
+  assert.ok(search.users.some(person => person.username === bruno.user.username))
+
+  const pending = await request<{ status: string }>('/friend-requests', alice.token, {
+    method: 'POST', body: JSON.stringify({ username: bruno.user.username }),
+  })
+  assert.equal(pending.status, 'pending')
+  const inbox = await request<{ incoming: { username: string }[] }>('/friends', bruno.token)
+  assert.ok(inbox.incoming.some(person => person.username === alice.user.username))
+
+  const accepted = await request<{ status: string; conversationId: string }>('/friend-requests', bruno.token, {
+    method: 'POST', body: JSON.stringify({ username: alice.user.username }),
+  })
+  assert.equal(accepted.status, 'accepted')
+
+  const aliceConversations = await request<{ conversations: { id: string }[] }>('/conversations', alice.token)
+  const brunoConversations = await request<{ conversations: { id: string }[] }>('/conversations', bruno.token)
+  assert.ok(aliceConversations.conversations.some(item => item.id === accepted.conversationId))
+  assert.ok(brunoConversations.conversations.some(item => item.id === accepted.conversationId))
+
+  const brunoSocket = connectSocket(origin, { auth: { token: bruno.token }, reconnection: false })
+  try {
+    await new Promise<void>((resolve, reject) => {
+      brunoSocket.once('connect', resolve)
+      brunoSocket.once('connect_error', reject)
+    })
+    const joined = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', accepted.conversationId, resolve))
+    assert.equal(joined.ok, true)
+
+    const nextLiveMessage = new Promise<{ text: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for a live message')), 3000)
+      brunoSocket.once('message:new', message => { clearTimeout(timeout); resolve(message) })
+    })
+    const sent = await request<{ message: { text: string } }>(`/conversations/${accepted.conversationId}/messages`, alice.token, {
+      method: 'POST', body: JSON.stringify({ text: 'Mensagem em tempo real' }),
+    })
+    assert.equal(sent.message.text, 'Mensagem em tempo real')
+    assert.equal((await nextLiveMessage).text, sent.message.text)
+
+    const history = await request<{ messages: { text: string }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+    assert.equal(history.messages.at(-1)?.text, sent.message.text)
+
+    const deniedJoin = await new Promise<{ ok: boolean }>((resolve, reject) => {
+      const carlaSocket = connectSocket(origin, { auth: { token: carla.token }, reconnection: false })
+      const timer = setTimeout(() => { carlaSocket.disconnect(); reject(new Error('Timed out checking access control')) }, 3000)
+      carlaSocket.once('connect_error', error => { clearTimeout(timer); carlaSocket.disconnect(); reject(error) })
+      carlaSocket.once('connect', () => carlaSocket.emit('conversation:join', accepted.conversationId, result => {
+        clearTimeout(timer); carlaSocket.disconnect(); resolve(result)
+      }))
+    })
+    assert.equal(deniedJoin.ok, false)
+
+    await request<void>(`/friends/${bruno.user.id}`, alice.token, { method: 'DELETE' })
+    const revokedJoin = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', accepted.conversationId, resolve))
+    assert.equal(revokedJoin.ok, false)
+    const removedFriends = await request<{ friends: { id: string }[] }>('/friends', alice.token)
+    assert.equal(removedFriends.friends.length, 0)
+    const removedConversations = await request<{ conversations: { id: string }[] }>('/conversations', bruno.token)
+    assert.ok(!removedConversations.conversations.some(item => item.id === accepted.conversationId))
+  } finally {
+    brunoSocket.disconnect()
+    await new Promise<void>(resolve => io.close(() => resolve()))
+    db.close()
+    rmSync(process.env.PROSA_DATA_DIR!, { recursive: true, force: true })
+  }
+})
