@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent }
 import './App.css'
 import { AccountDataControls } from './AccountDataControls'
 import { VoiceCall } from './VoiceCall'
-import { api, type ApiCommunity, type ApiCommunityMember, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiMessageSearchResult, type ApiPerson, type ApiPin, type ApiSession, type ProsaUser } from './api'
+import { api, ApiError, type ApiCommunity, type ApiCommunityMember, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiMessageSearchResult, type ApiPerson, type ApiPin, type ApiSession, type ProsaUser } from './api'
 import { io } from 'socket.io-client'
 
 type Message = { id: string; author: string; time: string; text: string; mine?: boolean; edited?: boolean; deleted?: boolean; pinned?: boolean; replyTo?: { id: string; author: string; text: string; deleted: boolean } | null; reactions?: { emoji: string; count: number; reactedByMe: boolean }[] }
@@ -37,6 +37,34 @@ function Icon({ name, size = 20 }: { name: string; size?: number }) {
   return <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>
 }
 
+function useDialogFocus(open: boolean, dialogRef: React.RefObject<HTMLElement | null>, onClose: () => void) {
+  const closeRef = useRef(onClose)
+  useEffect(() => { closeRef.current = onClose }, [onClose])
+  useEffect(() => {
+    const targetDialog = dialogRef.current
+    if (!open || !targetDialog) return
+    const dialog = targetDialog
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusables = () => Array.from(dialog.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])')).filter(element => !element.hidden && element.getAttribute('aria-hidden') !== 'true')
+    ;(dialog.querySelector<HTMLElement>('[autofocus],input:not([disabled])') ?? focusables()[0])?.focus()
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') { event.preventDefault(); closeRef.current(); return }
+      if (event.key !== 'Tab') return
+      const items = focusables()
+      if (!items.length) { event.preventDefault(); dialog.focus(); return }
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (event.shiftKey && (document.activeElement === first || !dialog.contains(document.activeElement))) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && (document.activeElement === last || !dialog.contains(document.activeElement))) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+      if (previous?.isConnected) previous.focus()
+    }
+  }, [open, dialogRef])
+}
+
 function App() {
   const [chats, setChats] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState('')
@@ -51,6 +79,12 @@ function App() {
   const [pinsOpen, setPinsOpen] = useState(false)
   const [voiceCallOpen, setVoiceCallOpen] = useState(false)
   const [voiceCallStartSignal, setVoiceCallStartSignal] = useState(0)
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false)
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false)
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false)
+  const [networkState, setNetworkState] = useState<'connecting' | 'connected' | 'reconnecting' | 'offline'>(() => navigator.onLine ? 'connecting' : 'offline')
+  const [restoreError, setRestoreError] = useState('')
+  const [announcement, setAnnouncement] = useState('')
   const [mutedUntil, setMutedUntil] = useState(0)
   const [notice, setNotice] = useState('')
   const [user, setUser] = useState<ProsaUser | null>(null)
@@ -78,7 +112,6 @@ function App() {
   const [authUsername, setAuthUsername] = useState('')
   const [authPassword, setAuthPassword] = useState('')
   const [serverDraft, setServerDraft] = useState(() => api.serverUrl().replace(/\/api$/, ''))
-  const [mobileConversationListOpen, setMobileConversationListOpen] = useState(() => api.isAndroid())
   const [loading, setLoading] = useState(() => api.hasSession())
   const [busy, setBusy] = useState(false)
   const [loadingOlder, setLoadingOlder] = useState(false)
@@ -94,7 +127,55 @@ function App() {
   const nearBottomRef = useRef(true)
   const renderedMessageCountRef = useRef(0)
   const pendingMessageIdRef = useRef<string | null>(null)
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const mobileNavigationRef = useRef<HTMLElement>(null)
+  const accountMenuRef = useRef<HTMLDivElement>(null)
+  const accountMenuTriggerRef = useRef<HTMLButtonElement>(null)
+  const addContactDialogRef = useRef<HTMLElement>(null)
   const filtered = useMemo(() => chats.filter(chat => `${chat.name} ${chat.handle}`.toLowerCase().includes(query.toLowerCase())), [chats, query])
+
+  useDialogFocus(mobileNavigationOpen, mobileNavigationRef, () => setMobileNavigationOpen(false))
+  useDialogFocus(addContactOpen, addContactDialogRef, () => setAddContactOpen(false))
+
+  useEffect(() => {
+    const keydown = (event: KeyboardEvent) => {
+      const mac = /mac/i.test(navigator.platform)
+      const modifier = mac ? event.metaKey : event.ctrlKey
+      const target = event.target
+      const editing = target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
+      if (modifier && event.key.toLowerCase() === 'k' && !event.altKey && !event.shiftKey && !event.isComposing && !editing) {
+        event.preventDefault()
+        searchInputRef.current?.focus()
+      }
+      if (event.key === 'Escape') {
+        setEmojiPickerOpen(false)
+        setAccountMenuOpen(false)
+        setPinsOpen(false)
+      }
+    }
+    window.addEventListener('keydown', keydown)
+    const offline = () => setNetworkState('offline')
+    const online = () => setNetworkState('reconnecting')
+    window.addEventListener('offline', offline)
+    window.addEventListener('online', online)
+    return () => { window.removeEventListener('keydown', keydown); window.removeEventListener('offline', offline); window.removeEventListener('online', online) }
+  }, [])
+
+  useEffect(() => {
+    if (!accountMenuOpen) return
+    const closeOutside = (event: PointerEvent) => { if (event.target instanceof Node && !accountMenuRef.current?.contains(event.target)) setAccountMenuOpen(false) }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => document.removeEventListener('pointerdown', closeOutside)
+  }, [accountMenuOpen])
+
+  useEffect(() => {
+    if (!accountMenuOpen) return
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); setAccountMenuOpen(false); accountMenuTriggerRef.current?.focus() }
+    }
+    document.addEventListener('keydown', closeOnEscape)
+    return () => document.removeEventListener('keydown', closeOnEscape)
+  }, [accountMenuOpen])
 
   useEffect(() => { chatsRef.current = chats }, [chats])
 
@@ -175,8 +256,15 @@ function App() {
         const page = await api.messages(conversation.id)
         return fromApiConversation(conversation, page, currentUser)
       }))
-      if (mounted) { setChats(mapped); setActiveId(mapped[0]?.id ?? ''); setPeople(nextPeople); setCommunities(nextCommunities.communities); setSelectedCommunityId(nextCommunities.communities[0]?.id ?? ''); setCommunityPickerId(nextCommunities.communities[0]?.id ?? '') }
-    }).catch(() => { void api.logout() }).finally(() => { if (mounted) setLoading(false) })
+      if (mounted) { setChats(mapped); setActiveId(mapped[0]?.id ?? ''); setPeople(nextPeople); setCommunities(nextCommunities.communities); setSelectedCommunityId(nextCommunities.communities[0]?.id ?? ''); setCommunityPickerId(nextCommunities.communities[0]?.id ?? ''); setNetworkState('connected') }
+    }).catch(error => {
+      if (!mounted) return
+      if (error instanceof ApiError && error.status === 401) void api.logout()
+      else {
+        setRestoreError('Não foi possível conectar ao serviço. Sua sessão foi preservada; verifique a conexão e tente novamente.')
+        setNetworkState(navigator.onLine ? 'reconnecting' : 'offline')
+      }
+    }).finally(() => { if (mounted) setLoading(false) })
     return () => { mounted = false }
   }, [])
 
@@ -189,9 +277,11 @@ function App() {
   useEffect(() => {
     if (!user || !activeConversationId) return
     const socket = io(api.socketOrigin(), { auth: { token: api.sessionToken() }, reconnection: true, reconnectionDelayMax: 5000 })
-    socket.on('connect', () => socket.emit('conversation:join', activeConversationId, (result: { ok: boolean }) => {
+    socket.on('connect', () => { setNetworkState('connected'); socket.emit('conversation:join', activeConversationId, (result: { ok: boolean }) => {
       if (!result.ok) setNotice('Esta conversa não está mais disponível.')
-    }))
+    }) })
+    socket.on('disconnect', () => setNetworkState(navigator.onLine ? 'reconnecting' : 'offline'))
+    socket.on('connect_error', () => setNetworkState(navigator.onLine ? 'reconnecting' : 'offline'))
     socket.on('conversations:changed', () => { void refreshConversations(user).catch(() => undefined) })
     socket.on('contacts:changed', () => { void refreshPeople().catch(() => undefined) })
     socket.on('communities:changed', () => { void refreshCommunities().catch(() => undefined) })
@@ -205,6 +295,7 @@ function App() {
         return { ...chat, preview: message.text, time: mapped.time, unreadCount: message.authorId !== user.id && !isOpen ? chat.unreadCount + 1 : chat.unreadCount, messages: !alreadyLoaded && isOpen ? [...chat.messages, mapped] : chat.messages }
       }))
       if (isOpen && message.authorId !== user.id) void api.markRead(message.conversationId).catch(() => undefined)
+      if (isOpen && message.authorId !== user.id) setAnnouncement(`Nova mensagem de ${mapped.author}`)
       if (!found) void refreshConversations(user).catch(() => undefined)
     })
     socket.on('message:updated', (message: ApiMessage) => {
@@ -267,6 +358,8 @@ function App() {
         ? await api.register(authUsername, authName, authPassword)
         : await api.login(authUsername, authPassword)
       setUser(nextUser)
+      setRestoreError('')
+      setNetworkState('connected')
       setChats([])
       await Promise.all([refreshConversations(nextUser), refreshPeople(), refreshCommunities()])
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível entrar.') }
@@ -418,6 +511,7 @@ function App() {
       }
       setDraft('')
       setReplyingTo(null)
+      setAnnouncement('Mensagem enviada')
     } catch (error) { setNotice(error instanceof Error ? error.message : 'A mensagem não foi enviada.') }
   }
 
@@ -493,9 +587,10 @@ function App() {
   }
 
   async function openConversation(id: string, targetMessageId?: string) {
-    setMobileConversationListOpen(false)
+    setMobileNavigationOpen(false)
     setActiveView('messages')
     setActiveId(id)
+    setAnnouncement(`Conversa aberta: ${chats.find(chat => chat.id === id)?.name ?? 'conversa'}`)
     setNotice('')
     if (!user) return
     try {
@@ -547,49 +642,57 @@ function App() {
 
   if (loading) return <main className="auth-screen"><div className="auth-card"><img className="auth-brand" src={`${import.meta.env.BASE_URL}prosa-logo.png`} alt="Prosa" /><p>Conectando ao Prosa…</p></div></main>
 
+  if (restoreError) return <main className="auth-screen"><section className="auth-card" aria-labelledby="connection-error-title"><img className="auth-brand" src={`${import.meta.env.BASE_URL}prosa-logo.png`} alt="Prosa" /><p className="eyebrow">CONEXÃO</p><h1 id="connection-error-title">Não foi possível abrir sua conta.</h1><p className="auth-error" role="alert">{restoreError}</p><button className="auth-submit" onClick={() => window.location.reload()}>Tentar novamente</button></section></main>
+
   if (!user) return <main className="auth-screen"><form className="auth-card" onSubmit={submitAuth}><img className="auth-brand" src={`${import.meta.env.BASE_URL}prosa-logo.png`} alt="Prosa" /><p className="eyebrow">CONVERSAS QUE APROXIMAM</p><h1>{authMode === 'register' ? 'Seu espaço começa aqui.' : 'Que bom ter você de volta.'}</h1><p className="auth-description">{authMode === 'register' ? 'Crie sua conta para começar a conversar.' : 'Entre para continuar suas conversas.'}</p>{api.isAndroid() && <><label>Endereço seguro do serviço<input type="url" autoComplete="url" required={!api.hasServer()} value={serverDraft} onChange={event => setServerDraft(event.target.value)} placeholder="https://prosa.seudominio.com" /></label><button type="button" className="server-save" onClick={() => { try { const endpoint = api.saveServerUrl(serverDraft); setServerDraft(endpoint.replace(/\/api$/, '')); setNotice('Endereço do serviço salvo neste dispositivo.') } catch (error) { setNotice(error instanceof Error ? error.message : 'Endereço inválido.') } }}>Salvar endereço</button></>}{authMode === 'register' && <label>Como podemos te chamar?<input autoComplete="name" required maxLength={48} value={authName} onChange={event => setAuthName(event.target.value)} placeholder="Nome de exibição" /></label>}<label>Nome de usuário<input autoComplete="username" required minLength={3} maxLength={24} value={authUsername} onChange={event => setAuthUsername(event.target.value)} placeholder="ex.: ana_silva" /></label><label>Senha<input autoComplete={authMode === 'register' ? 'new-password' : 'current-password'} required minLength={authMode === 'register' ? 12 : 1} maxLength={128} type="password" value={authPassword} onChange={event => setAuthPassword(event.target.value)} placeholder={authMode === 'register' ? 'Pelo menos 12 caracteres' : 'Sua senha'} /></label>{notice && <p className="auth-error" role="alert">{notice}</p>}<button className="auth-submit" disabled={busy}>{busy ? 'Aguarde…' : authMode === 'register' ? 'Criar conta' : 'Entrar'}</button><p className="auth-switch">{authMode === 'register' ? 'Já tem uma conta?' : 'Primeira vez por aqui?'} <button type="button" onClick={() => { setAuthMode(authMode === 'register' ? 'login' : 'register'); setNotice('') }}>{authMode === 'register' ? 'Entrar' : 'Criar conta'}</button></p>{!api.isAndroid() && <p className="auth-local-note">Conta de desenvolvimento: o serviço local guarda os dados neste dispositivo.</p>}</form></main>
 
   return <main className="app-shell">
-    <aside className="rail">
+    <aside className="rail" aria-label="Navegação principal">
       <a className="brand-mark" href="#inicio" aria-label="Prosa início"><img src={`${import.meta.env.BASE_URL}prosa-logo.png`} alt="" /></a>
       <div className="rail-divider" />
-      <button className={`rail-button ${activeView === 'messages' ? 'selected' : ''}`} aria-label="Mensagens" onClick={() => { setActiveView('messages'); if (api.isAndroid()) setMobileConversationListOpen(true) }}><Icon name="message" /></button>
-      <button className={`rail-button ${activeView === 'friends' ? 'selected' : ''}`} aria-label="Contatos" onClick={() => setActiveView('friends')}><Icon name="users" /></button>
-      <button className={`rail-button ${activeView === 'communities' ? 'selected' : ''}`} aria-label="Comunidades" onClick={() => setActiveView('communities')}><Icon name="community" /></button>
+      <button className={`rail-button ${activeView === 'messages' ? 'selected' : ''}`} aria-label="Mensagens" aria-current={activeView === 'messages' ? 'page' : undefined} onClick={() => { setActiveView('messages'); if (window.matchMedia('(max-width: 700px)').matches) setMobileNavigationOpen(true) }}><Icon name="message" /></button>
+      <button className={`rail-button ${activeView === 'friends' ? 'selected' : ''}`} aria-label="Contatos" aria-current={activeView === 'friends' ? 'page' : undefined} onClick={() => setActiveView('friends')}><Icon name="users" /></button>
+      <button className={`rail-button ${activeView === 'communities' ? 'selected' : ''}`} aria-label="Comunidades" aria-current={activeView === 'communities' ? 'page' : undefined} onClick={() => setActiveView('communities')}><Icon name="community" /></button>
       <button className="rail-button" aria-label="Adicionar contato" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}><Icon name="plus" /></button>
       <div className="rail-spacer" />
-      <button className={`rail-button ${activeView === 'security' ? 'selected' : ''}`} aria-label="Segurança e sessões" onClick={() => { setActiveView('security'); void refreshSessions() }}><Icon name="settings" /></button>
-      <button className="profile-orb" aria-label="Sair da conta" onClick={() => void signOut()} title={`${user.displayName} · sair`}>{user.displayName.slice(0, 1).toUpperCase()}<span className="presence-dot" /></button>
+      <button id="security-nav" className={`rail-button ${activeView === 'security' ? 'selected' : ''}`} aria-label="Segurança e sessões" aria-current={activeView === 'security' ? 'page' : undefined} onClick={() => { setActiveView('security'); void refreshSessions() }}><Icon name="settings" /></button>
+      <div className="account-menu" ref={accountMenuRef}><button id="account-menu-trigger" ref={accountMenuTriggerRef} className="profile-orb" aria-label={`Abrir opções da conta de ${user.displayName}`} aria-expanded={accountMenuOpen} aria-controls="account-menu-options" onClick={() => setAccountMenuOpen(value => !value)}>{user.displayName.slice(0, 1).toUpperCase()}<span className="presence-dot" /></button><div className="account-menu-options" id="account-menu-options" aria-label="Opções da conta" hidden={!accountMenuOpen}><strong>{user.displayName}</strong><span>@{user.username}</span><button onClick={() => { setAccountMenuOpen(false); setActiveView('security'); void refreshSessions(); document.getElementById('security-nav')?.focus() }}>Segurança e sessões</button><button onClick={() => { setAccountMenuOpen(false); void signOut() }}>Sair da conta</button></div></div>
     </aside>
 
-    <aside className="sidebar">
+    <aside className="sidebar" aria-label="Lista de conversas e busca">
       <header className="sidebar-heading"><div><p className="eyebrow">{user.displayName.toLocaleUpperCase('pt-BR')}</p><h1>{activeView === 'friends' ? 'Contatos' : activeView === 'communities' ? 'Comunidades' : activeView === 'security' ? 'Segurança' : 'Mensagens'}</h1></div>{activeView === 'communities' ? <button className="icon-button new-chat" aria-label="Atualizar comunidades" onClick={() => void refreshCommunities()}><Icon name="more" size={18} /></button> : activeView === 'security' ? <button className="icon-button new-chat" aria-label="Atualizar sessões" onClick={() => void refreshSessions()}><Icon name="more" size={18} /></button> : <button className="icon-button new-chat" aria-label="Adicionar contato" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}><Icon name="plus" size={18} /></button>}</header>
-      {activeView !== 'security' && <label className="search-box"><Icon name="search" size={17} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder={activeView === 'friends' ? 'Buscar contatos' : activeView === 'communities' ? 'Canais da comunidade' : 'Buscar conversas e mensagens'} /><kbd>⌘ K</kbd></label>}
-      <nav className="tabs" aria-label="Navegação">{[{ id: 'messages', label: 'Mensagens' }, { id: 'friends', label: 'Contatos' }, { id: 'communities', label: 'Comunidades' }].map(item => <button key={item.id} className={`tab ${activeView === item.id ? 'active' : ''}`} onClick={() => setActiveView(item.id as 'messages' | 'friends' | 'communities')}>{item.label}{item.id === 'friends' && people.incoming.length > 0 && <span className="tab-count">{people.incoming.length}</span>}</button>)}</nav>
+      {activeView !== 'security' && <label className="search-box"><Icon name="search" size={17} /><input ref={searchInputRef} aria-keyshortcuts={/mac/i.test(navigator.platform) ? 'Meta+K' : 'Control+K'} value={query} onChange={event => setQuery(event.target.value)} placeholder={activeView === 'friends' ? 'Buscar contatos' : activeView === 'communities' ? 'Canais da comunidade' : 'Buscar conversas e mensagens'} /><kbd>{/mac/i.test(navigator.platform) ? '⌘ K' : 'Ctrl K'}</kbd></label>}
+      <nav className="tabs" aria-label="Navegação">{[{ id: 'messages', label: 'Mensagens' }, { id: 'friends', label: 'Contatos' }, { id: 'communities', label: 'Comunidades' }].map(item => <button key={item.id} className={`tab ${activeView === item.id ? 'active' : ''}`} aria-current={activeView === item.id ? 'page' : undefined} onClick={() => setActiveView(item.id as 'messages' | 'friends' | 'communities')}>{item.label}{item.id === 'friends' && people.incoming.length > 0 && <span className="tab-count">{people.incoming.length}</span>}</button>)}</nav>
       {activeView === 'messages' && communities.length > 0 && <label className="community-picker"><span>COMUNIDADE</span><select value={communityPickerId} onChange={event => { setCommunityPickerId(event.target.value); setSelectedCommunityId(event.target.value) }}>{communities.map(community => <option key={community.id} value={community.id}>{community.name}</option>)}</select></label>}
       <div className="section-label"><span>{activeView === 'friends' ? 'CONECTADOS' : activeView === 'communities' ? 'CANAIS' : activeView === 'security' ? 'CONTA' : query.trim().length >= 2 ? 'CONVERSAS' : 'RECENTES'}</span><button aria-label="Atualizar lista" onClick={() => void (activeView === 'friends' ? refreshPeople() : activeView === 'communities' ? refreshCommunities() : activeView === 'security' ? refreshSessions() : refreshConversations())}><Icon name="more" size={17} /></button></div>
-      <div className="conversation-list">{activeView === 'security' ? <p className="empty-people">Sessões e dispositivos da sua conta.</p> : activeView === 'messages' ? <>{filtered.map(chat => <button key={chat.id} className={`conversation ${activeId === chat.id ? 'active' : ''}`} onClick={() => void openConversation(chat.id)}>
+      <div className="conversation-list">{activeView === 'security' ? <p className="empty-people">Sessões e dispositivos da sua conta.</p> : activeView === 'messages' ? <>{filtered.map(chat => <button key={chat.id} className={`conversation ${activeId === chat.id ? 'active' : ''}`} aria-current={activeId === chat.id ? 'true' : undefined} onClick={() => void openConversation(chat.id)}>
         <span className={`avatar ${chat.color}`}>{chat.initials}{chat.online && <i />}</span><span className="conversation-copy"><span className="conversation-top"><strong>{chat.name}</strong><time>{chat.time}</time></span><span className="conversation-bottom"><span>{chat.preview}</span>{chat.unreadCount > 0 && <i className="unread-dot" title={`${chat.unreadCount} mensagens não lidas`} />}</span></span>
       </button>)}{selectedCommunity?.channels.filter(channel => channel.name.toLowerCase().includes(query.toLowerCase())).map(channel => <button key={channel.id} className={`conversation ${activeId === channel.conversationId ? 'active' : ''}`} onClick={() => void openConversation(channel.conversationId)}><span className="avatar violet">#</span><span className="conversation-copy"><span className="conversation-top"><strong>{channel.name}</strong></span><span className="conversation-bottom"><span>{selectedCommunity.name}</span></span></span></button>)}</> : activeView === 'friends' ? people.friends.filter(person => `${person.displayName} ${person.username}`.toLowerCase().includes(query.toLowerCase())).map(person => <button key={person.id} className={`conversation ${activeId === chats.find(chat => chat.handle === `@${person.username}`)?.id ? 'active' : ''}`} onClick={() => { const conversation = chats.find(chat => chat.handle === `@${person.username}`); if (conversation) void openConversation(conversation.id) }}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><span className="conversation-copy"><span className="conversation-top"><strong>{person.displayName}</strong></span><span className="conversation-bottom"><span>@{person.username}</span></span></span></button>) : selectedCommunity ? selectedCommunity.channels.filter(channel => channel.name.toLowerCase().includes(query.toLowerCase())).map(channel => <button key={channel.id} className={`conversation ${activeId === channel.conversationId ? 'active' : ''}`} onClick={() => void openConversation(channel.conversationId)}><span className="avatar violet">#</span><span className="conversation-copy"><span className="conversation-top"><strong>{channel.name}</strong></span><span className="conversation-bottom"><span>{selectedCommunity.name}</span></span></span></button>) : <p className="empty-people">Selecione uma comunidade no painel.</p>}</div>
       {activeView === 'messages' && query.trim().length >= 2 && <div className="search-results" aria-live="polite"><div className="search-results-title">MENSAGENS</div>{!searchResults || searchResults.query !== query.trim() || searchResults.userId !== user.id ? <p className="empty-search">Buscando mensagens…</p> : searchResults.messages.length ? searchResults.messages.map(result => <button className="search-result" key={result.id} onClick={() => void openConversation(result.conversationId, result.id)}><span className="search-result-top"><strong>{result.conversationName}</strong><time>{localTime(result.createdAt)}</time></span><span className="search-result-text">{result.author}: {result.text}</span></button>) : <p className="empty-search">Nenhuma mensagem encontrada.</p>}</div>}
       <div className="sidebar-bottom"><div className="sync-mark"><span /> Sessão ativa · @{user.username}</div></div>
     </aside>
 
-    {api.isAndroid() && mobileConversationListOpen && <div className="mobile-chat-overlay" role="dialog" aria-modal="true" aria-label="Conversas"><section><header><h2>Conversas</h2><button className="modal-close" onClick={() => setMobileConversationListOpen(false)} aria-label="Fechar">×</button></header><div className="mobile-chat-list">{chats.map(chat => <button key={chat.id} className={`conversation ${activeId === chat.id ? 'active' : ''}`} onClick={() => void openConversation(chat.id)}><span className={`avatar ${chat.color}`}>{chat.initials}</span><span className="conversation-copy"><span className="conversation-top"><strong>{chat.name}</strong><time>{chat.time}</time></span><span className="conversation-bottom"><span>{chat.preview}</span>{chat.unreadCount > 0 && <i className="unread-dot" />}</span></span></button>)}{chats.length === 0 && <p className="empty-people">Suas conversas aparecerão aqui quando você se conectar com alguém.</p>}</div></section></div>}
+    {mobileNavigationOpen && <div className="mobile-navigation-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setMobileNavigationOpen(false) }}><section className="mobile-navigation" ref={mobileNavigationRef} role="dialog" aria-modal="true" aria-labelledby="mobile-navigation-title">
+      <header><h2 id="mobile-navigation-title">Navegação</h2><button className="modal-close" onClick={() => setMobileNavigationOpen(false)} aria-label="Fechar navegação">×</button></header>
+      <label className="search-box mobile-navigation-search"><Icon name="search" size={17} /><input value={query} onChange={event => setQuery(event.target.value)} aria-label="Buscar conversas e canais" placeholder="Buscar conversas e canais" /><span className="keyboard-shortcut-hint">{/mac/i.test(navigator.platform) ? '⌘ K' : 'Ctrl K'}</span></label>
+      <nav className="mobile-navigation-tabs" aria-label="Seções">{[{ id: 'messages', label: 'Mensagens' }, { id: 'friends', label: 'Contatos' }, { id: 'communities', label: 'Comunidades' }].map(item => <button key={item.id} aria-current={activeView === item.id ? 'page' : undefined} onClick={() => { setActiveView(item.id as 'messages' | 'friends' | 'communities'); setMobileNavigationOpen(false) }}>{item.label}</button>)}</nav>
+      {activeView === 'messages' && communities.length > 0 && <label className="community-picker"><span>COMUNIDADE</span><select aria-label="Selecionar comunidade" value={communityPickerId} onChange={event => { setCommunityPickerId(event.target.value); setSelectedCommunityId(event.target.value) }}>{communities.map(community => <option key={community.id} value={community.id}>{community.name}</option>)}</select></label>}
+      <div className="mobile-chat-list">{activeView === 'messages' && <>{filtered.map(chat => <button key={chat.id} className={`conversation ${activeId === chat.id ? 'active' : ''}`} aria-current={activeId === chat.id ? 'true' : undefined} onClick={() => void openConversation(chat.id)}><span className={`avatar ${chat.color}`}>{chat.initials}</span><span className="conversation-copy"><span className="conversation-top"><strong>{chat.name}</strong><time>{chat.time}</time></span><span className="conversation-bottom"><span>{chat.preview}</span>{chat.unreadCount > 0 && <i className="unread-dot" />}</span></span></button>)}{selectedCommunity?.channels.filter(channel => channel.name.toLowerCase().includes(query.toLowerCase())).map(channel => <button key={channel.id} className={`conversation ${activeId === channel.conversationId ? 'active' : ''}`} aria-current={activeId === channel.conversationId ? 'true' : undefined} onClick={() => void openConversation(channel.conversationId)}><span className="avatar violet">#</span><span className="conversation-copy"><span className="conversation-top"><strong>{channel.name}</strong></span><span className="conversation-bottom"><span>{selectedCommunity.name}</span></span></span></button>)}</>}{activeView === 'friends' && <button className="person-action primary mobile-add-contact" onClick={() => { setMobileNavigationOpen(false); setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Encontrar pessoas</button>}{activeView === 'messages' && chats.length === 0 && <p className="empty-people">Suas conversas aparecerão aqui quando você se conectar com alguém.</p>}</div>
+    </section></div>}
 
     <section className="chat-panel">
       {activeView === 'security' ? <div className="contacts-panel security-panel"><header className="chat-header"><div><p className="eyebrow">PROTEÇÃO DA CONTA</p><h2>Sessões ativas</h2></div><button className="person-action" onClick={() => void refreshSessions()} disabled={loadingSessions}>{loadingSessions ? 'Atualizando…' : 'Atualizar'}</button></header><div className="contacts-content"><p className="security-intro">Confira os dispositivos conectados à sua conta. Encerrar uma sessão desconecta o aparelho escolhido.</p><section className="people-section"><h3>Dispositivos <span>{sessions.length}</span></h3>{loadingSessions ? <p className="empty-people">Carregando sessões…</p> : sessions.length ? sessions.map(session => <article className="person-row session-row" key={session.id}><span className={`avatar ${session.current ? 'green' : 'violet'}`}><Icon name="settings" size={17}/></span><div className="person-info"><strong>{session.label}{Boolean(session.current) && <span className="current-session">Este dispositivo</span>}</strong><span>Atividade: {session.lastSeenAt > 0 ? new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(session.lastSeenAt)) : 'não registrada'} · expira em {new Intl.DateTimeFormat('pt-BR', { dateStyle: 'medium' }).format(new Date(session.expiresAt))}</span></div>{!session.current && <button className="person-action" onClick={() => void revokeSession(session)}>Encerrar</button>}</article>) : <p className="empty-people">Nenhuma sessão ativa foi encontrada.</p>}</section><section className="people-section"><form className="password-form" onSubmit={changePassword}><div><h3>Alterar senha</h3><p>Para proteger a conta, os outros dispositivos serão desconectados.</p></div><label>Senha atual<input type="password" autoComplete="current-password" required maxLength={128} value={currentPasswordDraft} onChange={event => setCurrentPasswordDraft(event.target.value)} /></label><label>Nova senha<input type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={newPasswordDraft} onChange={event => setNewPasswordDraft(event.target.value)} placeholder="Pelo menos 12 caracteres" /></label><label>Confirme a nova senha<input type="password" autoComplete="new-password" required minLength={12} maxLength={128} value={confirmPasswordDraft} onChange={event => setConfirmPasswordDraft(event.target.value)} /></label><button className="person-action primary" disabled={changingPassword}>{changingPassword ? 'Salvando…' : 'Atualizar senha'}</button></form></section><AccountDataControls user={user} onDeleted={signOut} onNotice={setNotice}/><p className="security-note">Os dispositivos são identificados pelo navegador ou aplicativo que iniciou a sessão. Se reconhecer algo estranho, encerre essa sessão e altere sua senha.</p></div></div> : activeView === 'communities' ? renderCommunitiesPanel() : activeView === 'friends' ? <div className="contacts-panel"><header className="chat-header"><div><p className="eyebrow">SUA REDE</p><h2>Contatos</h2></div><button className="auth-submit contact-add" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Adicionar pessoa</button></header><div className="contacts-content">{people.incoming.length > 0 && <section className="people-section"><h3>Pedidos recebidos <span>{people.incoming.length}</span></h3>{people.incoming.map(person => <article className="person-row" key={person.id}><span className="avatar violet">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username}</span></div><button className="person-action primary" onClick={() => void acceptRequest(person)}>Aceitar</button><button className="person-action" onClick={() => void dismissRequest(person.id)}>Remover</button></article>)}</section>}{people.outgoing.length > 0 && <section className="people-section"><h3>Pedidos enviados</h3>{people.outgoing.map(person => <article className="person-row" key={person.id}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username} · aguardando resposta</span></div><button className="person-action" onClick={() => void dismissRequest(person.id)}>Cancelar</button></article>)}</section>}<section className="people-section"><h3>Conectados <span>{people.friends.length}</span></h3>{people.friends.length ? people.friends.map(person => <article className="person-row" key={person.id}><span className="avatar green">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}<i /></span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username}</span></div><button className="person-action primary" onClick={() => { const conversation = chats.find(chat => chat.handle === `@${person.username}`); if (conversation) { setActiveView('messages'); setActiveId(conversation.id) } }}>Mensagem</button><button className="person-action" onClick={() => void removeConnection(person)}>Remover</button></article>) : <p className="empty-people">Seus contatos aparecerão aqui quando aceitarem um pedido.</p>}</section></div></div> : active ? <>
-      <header className="chat-header"><div className="chat-person"><span className={`avatar small ${active.color}`}>{active.initials}{active.online && <i />}</span><div><h2>{active.name}</h2><p>{active.communityName ? `${active.communityName} · canal` : active.handle === `@${user.username}` ? 'Conversa pessoal' : 'Conversa direta'}</p></div></div><div className="header-actions"><button className="icon-button" aria-label="Mensagens fixadas" aria-expanded={pinsOpen} onClick={() => setPinsOpen(value => !value)}>📌<span className="pin-count">{visiblePins.length}</span></button><details className="mute-menu"><summary aria-label="Configurar notificações">{muted ? '🔕' : '🔔'}</summary><div><strong>Notificações</strong>{[[0, 'Ativadas'], [3600000, '1 hora'], [28800000, '8 horas'], [86400000, '24 horas'], [604800000, '7 dias']].map(([duration, label]) => <button key={duration} onClick={() => void changeMute(Number(duration))}>{label}</button>)}</div></details><button className="icon-button" aria-label={voiceCallEnabled ? 'Chamada de voz' : 'Chamada de voz indisponível'} disabled={!voiceCallEnabled} onClick={() => { setVoiceCallOpen(true); setVoiceCallStartSignal(value => value + 1) }}><Icon name="phone" /></button><button className="icon-button" aria-label="Chamada de vídeo" onClick={() => setNotice('A chamada de vídeo ainda não está disponível.')}><Icon name="video" /></button><span className="action-divider" /><button className="icon-button" aria-label="Mais opções" onClick={() => setNotice('Mais opções de conversa em breve.')}><Icon name="more" /></button></div>{pinsOpen && <section className="pins-panel" aria-label="Mensagens fixadas"><header><strong>Fixadas</strong><button aria-label="Fechar fixadas" onClick={() => setPinsOpen(false)}>×</button></header>{visiblePins.length ? visiblePins.map(pin => <button key={pin.id} className="pin-item" onClick={() => void openPinnedMessage(pin.id)}><strong>{pin.author}</strong><span>{pin.text}</span></button>) : <p>Nenhuma mensagem fixada.</p>}</section>}</header>
+      <header className="chat-header"><button className="icon-button mobile-nav-toggle" aria-label="Abrir conversas e navegação" onClick={() => setMobileNavigationOpen(true)}><Icon name="message" /></button><div className="chat-person"><span className={`avatar small ${active.color}`}>{active.initials}{active.online && <i />}</span><div><h2>{active.name}</h2><p>{active.communityName ? `${active.communityName} · canal` : active.handle === `@${user.username}` ? 'Conversa pessoal' : 'Conversa direta'}</p></div></div><div className="header-actions"><button className="icon-button" aria-label="Mensagens fixadas" aria-expanded={pinsOpen} onClick={() => setPinsOpen(value => !value)}>📌<span className="pin-count">{visiblePins.length}</span></button><details className="mute-menu"><summary aria-label="Configurar notificações">{muted ? '🔕' : '🔔'}</summary><div><strong>Notificações</strong>{[[0, 'Ativadas'], [3600000, '1 hora'], [28800000, '8 horas'], [86400000, '24 horas'], [604800000, '7 dias']].map(([duration, label]) => <button key={duration} onClick={() => void changeMute(Number(duration))}>{label}</button>)}</div></details>{voiceCallEnabled && <button className="icon-button" aria-label="Chamada de voz" onClick={() => { setVoiceCallOpen(true); setVoiceCallStartSignal(value => value + 1) }}><Icon name="phone" /></button>}</div>{pinsOpen && <section className="pins-panel" aria-label="Mensagens fixadas"><header><strong>Fixadas</strong><button aria-label="Fechar fixadas" onClick={() => setPinsOpen(false)}>×</button></header>{visiblePins.length ? visiblePins.map(pin => <button key={pin.id} className="pin-item" onClick={() => void openPinnedMessage(pin.id)}><strong>{pin.author}</strong><span>{pin.text}</span></button>) : <p>Nenhuma mensagem fixada.</p>}</section>}</header>
       <VoiceCall conversationId={active.id} peerName={active.name} enabled={voiceCallEnabled} open={voiceCallOpen} startSignal={voiceCallStartSignal} onIncoming={() => setVoiceCallOpen(true)} onClose={() => setVoiceCallOpen(false)} onNotice={setNotice} />
       <div className="message-scroll" ref={messageScrollRef} onScroll={event => { const element = event.currentTarget; nearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}><div className="day-divider"><span>HISTÓRICO</span></div>{active.olderCursor && <button className="load-older" disabled={loadingOlder} onClick={() => void loadOlderMessages()}>{loadingOlder ? 'Carregando…' : 'Carregar mensagens anteriores'}</button>}<div className="messages">{active.messages.map((message, index) => {
         const previous = active.messages[index - 1]
         const grouped = previous?.author === message.author
         return <article key={message.id} data-message-id={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}{message.pinned && <span className="message-pin-label">📌 Fixada</span>}{editingMessageId === message.id ? <form className="message-edit-form" onSubmit={saveMessageEdit}><textarea aria-label="Editar mensagem" maxLength={4000} value={editDraft} onChange={event => setEditDraft(event.target.value)} autoFocus /><div><button type="button" onClick={() => { setEditingMessageId(''); setEditDraft('') }}>Cancelar</button><button type="submit" disabled={!editDraft.trim()}>Salvar</button></div></form> : <>{message.replyTo && <button className="reply-preview" onClick={() => void openConversation(active.id, message.replyTo!.id)}><strong>{message.replyTo.author}</strong><span>{message.replyTo.deleted ? "Mensagem removida" : message.replyTo.text}</span></button>}<p className={message.deleted ? 'message-deleted' : undefined}>{message.deleted ? 'Esta mensagem foi removida.' : message.text}{message.edited && !message.deleted && <small className="message-edited"> editada</small>}</p>{message.mine && !message.deleted && <div className="message-actions"><button onClick={() => { setEditingMessageId(message.id); setEditDraft(message.text) }}>Editar</button><button onClick={() => void removeMessage(message.id)}>Remover</button></div>}</>}{!message.deleted && <div className={`message-social-controls ${reactionPickerId === message.id ? 'open' : ''}`}><button onClick={() => setReplyingTo(message)}>Responder</button><button aria-pressed={Boolean(message.pinned)} onClick={() => void togglePin(message)}>{message.pinned ? 'Desafixar' : 'Fixar'}</button><button aria-expanded={reactionPickerId === message.id} aria-controls={`reaction-picker-${message.id}`} onClick={() => setReactionPickerId(current => current === message.id ? '' : message.id)}>Reagir</button>{message.reactions?.map(reaction => <button key={reaction.emoji} className={`message-reaction ${reaction.reactedByMe ? 'selected' : ''}`} aria-label={`${reaction.emoji}: ${reaction.count}`} onClick={() => void toggleReaction(message.id, reaction.emoji)}>{reaction.emoji} <span>{reaction.count}</span></button>)}{reactionPickerId === message.id && !message.deleted && <span className="reaction-picker" id={`reaction-picker-${message.id}`}>{['👍', '❤️', '😂', '😮', '🎉', '🔥'].map(emoji => <button key={emoji} aria-label={`Reagir com ${emoji}`} onClick={() => { void toggleReaction(message.id, emoji); setReactionPickerId('') }}>{emoji}</button>)}</span>}</div>}</div></article>
       })}</div></div>
-      <form className="composer" onSubmit={sendMessage}>{replyingTo && <div className="reply-draft"><span>Respondendo a <strong>{replyingTo.author}</strong>: {replyingTo.deleted ? 'Mensagem removida' : replyingTo.text}</span><button type="button" aria-label="Cancelar resposta" onClick={() => setReplyingTo(null)}>×</button></div>}<div className="composer-controls"><button type="button" className="composer-tool attach" aria-label="Anexar arquivo" onClick={() => setNotice('O envio de arquivos será ativado com o armazenamento do Prosa.')}><Icon name="paperclip" size={19} /></button><input aria-label="Escrever mensagem" value={draft} onChange={event => setDraft(event.target.value)} placeholder={`Escreva para ${active.name.split(' ')[0]}...`} /><button type="button" className="composer-tool" aria-label="Emoji" onClick={() => setDraft(value => `${value} ✨`)}><Icon name="smile" size={19} /></button><button type="submit" className="send-button" aria-label="Enviar mensagem" disabled={!draft.trim()}><Icon name="send" size={17} /></button></div></form>
-      <footer className="chat-footnote">Mensagens salvas no banco local do Prosa.</footer></> : <div className="empty-chat"><img className="auth-brand" src={`${import.meta.env.BASE_URL}prosa-logo.png`} alt="Prosa" /><h2>Seu Prosa está pronto.</h2><p>Encontre pessoas pelo nome de usuário para começar uma conversa.</p><button className="auth-submit" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Encontrar pessoas</button></div>}
+      <form className="composer" onSubmit={sendMessage}>{replyingTo && <div className="reply-draft"><span>Respondendo a <strong>{replyingTo.author}</strong>: {replyingTo.deleted ? 'Mensagem removida' : replyingTo.text}</span><button type="button" aria-label="Cancelar resposta" onClick={() => setReplyingTo(null)}>×</button></div>}<div className="composer-controls"><input aria-label="Escrever mensagem" value={draft} onChange={event => setDraft(event.target.value)} placeholder={`Escreva para ${active.name.split(' ')[0]}...`} /><button type="button" className="composer-tool" aria-label="Escolher emoji" aria-expanded={emojiPickerOpen} aria-controls="composer-emoji-picker" onClick={() => setEmojiPickerOpen(value => !value)}><Icon name="smile" size={19} /></button>{emojiPickerOpen && <div className="emoji-picker" id="composer-emoji-picker" role="group" aria-label="Emojis"><span>{['🙂','😂','❤️','👍','🎉','✨'].map(emoji => <button type="button" key={emoji} aria-label={`Inserir ${emoji}`} onClick={() => { setDraft(value => `${value}${value ? ' ' : ''}${emoji}`); setEmojiPickerOpen(false) }}>{emoji}</button>)}</span></div>}<button type="submit" className="send-button" aria-label="Enviar mensagem" disabled={!draft.trim()}><Icon name="send" size={17} /></button></div></form>
+      <footer className="chat-footnote" role="status" aria-live="polite">{networkState === 'connected' ? 'Conectado · mensagens sincronizadas em tempo real' : networkState === 'reconnecting' || networkState === 'connecting' ? 'Reconectando · aguarde para continuar enviando mensagens' : 'Sem conexão · verifique a rede para enviar e receber mensagens'}</footer><span className="sr-only" aria-live="polite">{announcement}</span></> : <div className="empty-chat"><img className="auth-brand" src={`${import.meta.env.BASE_URL}prosa-logo.png`} alt="Prosa" /><h2>Seu Prosa está pronto.</h2><p>Encontre pessoas pelo nome de usuário para começar uma conversa.</p><button className="auth-submit" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Encontrar pessoas</button><p className="chat-footnote" role="status" aria-live="polite">{networkState === 'connected' ? 'Conectado · mensagens sincronizadas em tempo real' : networkState === 'reconnecting' || networkState === 'connecting' ? 'Reconectando · aguarde para continuar enviando mensagens' : 'Sem conexão · verifique a rede para enviar e receber mensagens'}</p></div>}
       {notice && <div className="notice" role="status">{notice}<button onClick={() => setNotice('')} aria-label="Fechar aviso">×</button></div>}
-      {addContactOpen && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setAddContactOpen(false) }}><section className="people-modal" role="dialog" aria-modal="true" aria-labelledby="add-contact-title"><button className="modal-close" onClick={() => setAddContactOpen(false)} aria-label="Fechar">×</button><p className="eyebrow">AMPLIE SUA REDE</p><h2 id="add-contact-title">Encontre pessoas</h2><p>Busque pelo nome de usuário para enviar um pedido de conexão.</p><label className="people-search"><Icon name="search" size={17} /><input autoFocus value={peopleQuery} onChange={event => { setPeopleQuery(event.target.value); if (event.target.value.trim().replace(/^@/, '').length < 2) setPeopleResults([]) }} placeholder="Digite pelo menos 2 caracteres" /></label><div className="people-results">{peopleQuery.trim().length < 2 ? <p className="empty-people">Comece digitando um nome de usuário.</p> : peopleResults.length ? peopleResults.map(person => <article className="person-row" key={person.id}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username}</span></div>{person.relationship === 'none' && <button className="person-action primary" onClick={() => void sendFriendRequest(person)}>Conectar</button>}{person.relationship === 'incoming' && <button className="person-action primary" onClick={() => void acceptRequest(person)}>Aceitar</button>}{person.relationship === 'outgoing' && <span className="relationship-label">Pedido enviado</span>}{person.relationship === 'friend' && <span className="relationship-label">Conectados</span>}</article>) : <p className="empty-people">Nenhuma pessoa encontrada.</p>}</div></section></div>}
+      {addContactOpen && <div className="modal-backdrop" onMouseDown={event => { if (event.target === event.currentTarget) setAddContactOpen(false) }}><section className="people-modal" ref={addContactDialogRef} role="dialog" aria-modal="true" aria-labelledby="add-contact-title"><button className="modal-close" onClick={() => setAddContactOpen(false)} aria-label="Fechar">×</button><p className="eyebrow">AMPLIE SUA REDE</p><h2 id="add-contact-title">Encontre pessoas</h2><p>Busque pelo nome de usuário para enviar um pedido de conexão.</p><label className="people-search"><Icon name="search" size={17} /><input autoFocus value={peopleQuery} onChange={event => { setPeopleQuery(event.target.value); if (event.target.value.trim().replace(/^@/, '').length < 2) setPeopleResults([]) }} placeholder="Digite pelo menos 2 caracteres" /></label><div className="people-results">{peopleQuery.trim().length < 2 ? <p className="empty-people">Comece digitando um nome de usuário.</p> : peopleResults.length ? peopleResults.map(person => <article className="person-row" key={person.id}><span className="avatar blue">{person.displayName.split(/\s+/).map(part => part[0]).join('').slice(0,2).toUpperCase()}</span><div className="person-info"><strong>{person.displayName}</strong><span>@{person.username}</span></div>{person.relationship === 'none' && <button className="person-action primary" onClick={() => void sendFriendRequest(person)}>Conectar</button>}{person.relationship === 'incoming' && <button className="person-action primary" onClick={() => void acceptRequest(person)}>Aceitar</button>}{person.relationship === 'outgoing' && <span className="relationship-label">Pedido enviado</span>}{person.relationship === 'friend' && <span className="relationship-label">Conectados</span>}</article>) : <p className="empty-people">Nenhuma pessoa encontrada.</p>}</div></section></div>}
     </section>
   </main>
 }

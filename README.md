@@ -34,6 +34,8 @@ npm run dev
 
 The client runs at `http://localhost:5173`; the API runs at `http://localhost:8787`. SQLite data is stored under `data/`. Set `PROSA_DATA_DIR`, `PORT`, or `HOST` to change the API data location, port, or listen address. The service binds to this device by default; set `CLIENT_ORIGIN` to a comma-separated list of allowed browser origins when developing with another client origin.
 
+The client uses system fonts and does not need a remote font service. Run `npm run test:e2e` to check signup, conversation flows, keyboard navigation, responsive layouts, connection status, and automated accessibility rules in Chromium. The test starts an isolated API and uses a temporary database.
+
 Create a client and service production build with `npm run build:desktop`. Start the API separately with `npm run api:start` during development.
 
 ## Service deployment
@@ -43,6 +45,8 @@ A production start command is available with `npm run api:start:prod` after `npm
 `deploy/compose.yaml` provides a single-server Docker deployment with persistent SQLite storage and Caddy-managed HTTPS. Follow [docs/deployment.md](docs/deployment.md) to set a domain and allowed origins before starting it. This repository does not provision or operate the server; the operator must configure DNS, network access, off-server backups, and restore checks. The SQLite deployment supports one API instance.
 
 Run the account, connection-request, access-control, message-persistence, and live-delivery integration check with `npm test`.
+
+Current release: **0.1.2**. See [release notes](docs/releases/0.1.2.md).
 
 Account export and deletion behavior is described in [docs/account-data.md](docs/account-data.md).
 

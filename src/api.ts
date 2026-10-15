@@ -16,6 +16,11 @@ export type ApiPerson = { id: string; userId?: string; username: string; display
 export type ApiFriendData = { friends: ApiPerson[]; incoming: ApiPerson[]; outgoing: ApiPerson[] }
 type AuthResult = { token: string; user: ProsaUser }
 
+export class ApiError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) { super(message); this.name = 'ApiError'; this.status = status }
+}
+
 const tokenKey = 'prosa.session'
 const apiServerKey = 'prosa.server'
 
@@ -38,7 +43,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${apiBase()}${path}`, { ...options, headers })
   if (!response.ok) {
     const result = await response.json().catch(() => ({})) as { error?: string }
-    throw new Error(result.error ?? `Falha na solicitação (${response.status}).`)
+    throw new ApiError(result.error ?? `Falha na solicitação (${response.status}).`, response.status)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
