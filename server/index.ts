@@ -270,6 +270,29 @@ app.post('/api/auth/logout', requireAuth, (req: AuthRequest, res) => {
 
 app.get('/api/me', requireAuth, (req: AuthRequest, res) => res.json({ user: req.user }))
 
+app.post('/api/auth/password', requireAuth, rateLimit({ windowMs: 60 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false }), async (req: AuthRequest, res, next) => {
+  try {
+    const currentPassword = String(req.body?.currentPassword ?? '')
+    const newPassword = String(req.body?.newPassword ?? '')
+    if (newPassword.length < 12 || newPassword.length > 128) return res.status(400).json({ error: 'A nova senha deve ter entre 12 e 128 caracteres.' })
+    const user = db.prepare('SELECT password_hash AS passwordHash FROM users WHERE id = ?').get(req.user!.id) as { passwordHash: string } | undefined
+    if (!user || !await argon2.verify(user.passwordHash, currentPassword).catch(() => false)) return res.status(401).json({ error: 'A senha atual está incorreta.' })
+    if (await argon2.verify(user.passwordHash, newPassword).catch(() => false)) return res.status(400).json({ error: 'Escolha uma senha diferente da atual.' })
+    const passwordHash = await argon2.hash(newPassword, { type: argon2.argon2id })
+    const otherSessions = db.prepare('SELECT token_hash AS tokenHash FROM sessions WHERE user_id = ? AND id <> ?').all(req.user!.id, req.sessionId) as { tokenHash: string }[]
+    const updatePassword = db.transaction(() => {
+      db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(passwordHash, req.user!.id)
+      db.prepare('DELETE FROM sessions WHERE user_id = ? AND id <> ?').run(req.user!.id, req.sessionId)
+    })
+    updatePassword()
+    const otherTokenHashes = new Set(otherSessions.map(session => session.tokenHash))
+    if (otherTokenHashes.size) void io.in(`user:${req.user!.id}`).fetchSockets().then(sockets => {
+      for (const socket of sockets) if (otherTokenHashes.has(socket.data.tokenHash)) socket.disconnect(true)
+    })
+    return res.status(204).end()
+  } catch (error) { return next(error) }
+})
+
 app.get('/api/sessions', requireAuth, (req: AuthRequest, res) => {
   db.prepare('DELETE FROM sessions WHERE user_id = ? AND expires_at <= ?').run(req.user!.id, Date.now())
   const sessions = db.prepare(`SELECT id, label, created_at AS createdAt, last_seen_at AS lastSeenAt,

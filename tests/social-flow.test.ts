@@ -76,6 +76,27 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   const revokedAliceSession = await sendHttp('/me', aliceSecondSession.token)
   assert.equal(revokedAliceSession.status, 401)
   assert.equal((await request<{ sessions: { id: string; current: number }[] }>('/sessions', alice.token)).sessions.length, 1)
+  const aliceThirdSession = await request<Account>('/auth/login', undefined, {
+    method: 'POST', body: JSON.stringify({ username: alice.user.username, password: 'SenhaDeIntegracao!2026' }),
+  })
+  const wrongCurrentPassword = await sendHttp('/auth/password', alice.token, {
+    method: 'POST', body: JSON.stringify({ currentPassword: 'senha-incorreta', newPassword: 'NovaSenhaSegura!2026' }),
+  })
+  assert.equal(wrongCurrentPassword.status, 401)
+  await request<void>('/auth/password', alice.token, {
+    method: 'POST', body: JSON.stringify({ currentPassword: 'SenhaDeIntegracao!2026', newPassword: 'NovaSenhaSegura!2026' }),
+  })
+  assert.equal((await sendHttp('/me', aliceThirdSession.token)).status, 401)
+  assert.equal((await sendHttp('/me', alice.token)).status, 200)
+  assert.equal((await sendHttp('/auth/login', undefined, {
+    method: 'POST', body: JSON.stringify({ username: alice.user.username, password: 'SenhaDeIntegracao!2026' }),
+  })).status, 401)
+  const reauthenticatedAlice = await request<Account>('/auth/login', undefined, {
+    method: 'POST', body: JSON.stringify({ username: alice.user.username, password: 'NovaSenhaSegura!2026' }),
+  })
+  assert.equal((await sendHttp('/me', reauthenticatedAlice.token)).status, 200)
+  await request<void>('/auth/logout', reauthenticatedAlice.token, { method: 'POST' })
+  assert.equal((await sendHttp('/me', reauthenticatedAlice.token)).status, 401)
 
   const search = await request<{ users: { username: string }[] }>(`/users/search?q=${bruno.user.username}`, alice.token)
   assert.ok(search.users.some(person => person.username === bruno.user.username))

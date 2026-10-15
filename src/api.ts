@@ -41,6 +41,7 @@ export const api = {
     return result.user
   },
   me: () => request<{ user: ProsaUser }>('/me'),
+  changePassword: (currentPassword: string, newPassword: string) => request<void>('/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   sessions: () => request<{ sessions: ApiSession[] }>('/sessions'),
   revokeSession: (id: string) => request<void>(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   logout: async () => { try { await request('/auth/logout', { method: 'POST' }) } finally { localStorage.removeItem(tokenKey) } },
