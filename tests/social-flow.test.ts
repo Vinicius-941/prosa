@@ -152,8 +152,11 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   const memberPromote = await sendHttp(`/communities/${newCommunity.community.id}/members/${bruno.user.id}/role`, bruno.token, { method: 'PUT', body: JSON.stringify({ role: 'admin' }) })
   assert.equal(memberPromote.status, 403)
   await request(`/communities/${newCommunity.community.id}/members/${bruno.user.id}/role`, alice.token, { method: 'PUT', body: JSON.stringify({ role: 'admin' }) })
-  const promotedMember = await request<{ communities: { role: string }[] }>('/communities', bruno.token)
+  const promotedMember = await request<{ communities: { role: string; inviteCode: string | null }[] }>('/communities', bruno.token)
   assert.equal(promotedMember.communities[0].role, 'admin')
+  assert.equal(promotedMember.communities[0].inviteCode, rotatedInvite.inviteCode)
+  const adminRotatedInvite = await request<{ inviteCode: string }>(`/communities/${newCommunity.community.id}/invite/rotate`, bruno.token, { method: 'POST' })
+  assert.notEqual(adminRotatedInvite.inviteCode, rotatedInvite.inviteCode)
   const extraChannel = await request<{ channel: { conversationId: string; name: string } }>(`/communities/${newCommunity.community.id}/channels`, alice.token, {
     method: 'POST', body: JSON.stringify({ name: 'ideias' }),
   })
@@ -184,7 +187,7 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   assert.equal((await sendHttp(`/conversations/${generalChannel.conversationId}/messages`, bruno.token)).status, 404)
   const brunoCommunityAfterRemoval = await request<{ communities: unknown[] }>('/communities', bruno.token)
   assert.equal(brunoCommunityAfterRemoval.communities.length, 0)
-  await request<{ communityId: string }>('/communities/join', bruno.token, { method: 'POST', body: JSON.stringify({ inviteCode: rotatedInvite.inviteCode }) })
+  await request<{ communityId: string }>('/communities/join', bruno.token, { method: 'POST', body: JSON.stringify({ inviteCode: adminRotatedInvite.inviteCode }) })
   const memberLeave = await request<void>(`/communities/${newCommunity.community.id}/members/${charlie.user.id}`, charlie.token, { method: 'DELETE' })
   assert.equal(memberLeave, undefined)
   const outsiderDelete = await sendHttp(`/communities/${newCommunity.community.id}`, carla.token, { method: 'DELETE' })
@@ -411,7 +414,7 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(receivedRevokedChannelEvent, false)
     const evictedJoin = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
     assert.equal(evictedJoin.ok, false)
-    await request<{ communityId: string }>('/communities/join', bruno.token, { method: 'POST', body: JSON.stringify({ inviteCode: rotatedInvite.inviteCode }) })
+    await request<{ communityId: string }>('/communities/join', bruno.token, { method: 'POST', body: JSON.stringify({ inviteCode: adminRotatedInvite.inviteCode }) })
     const rejoinedRoom = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
     assert.equal(rejoinedRoom.ok, true)
 
