@@ -1,23 +1,30 @@
 # Prosa
 
-Prosa is an independent communication app focused on clear, welcoming conversations. This repository contains the first desktop and web client foundation.
+Prosa is an independent communication app focused on clear, welcoming conversations. This repository contains a responsive client and a local API foundation.
 
 ## Current status
 
-The initial client includes a responsive messaging workspace, conversation switching, search and filters, and local message composition. Conversation examples are seeded interface content; messages sent in this first version stay in the current browser session. Accounts, persistent storage, synchronization, file uploads, voice/video, and moderation require backend services and are not implemented yet.
+The client supports account creation, sign-in, sign-out, a personal conversation, and sending and reading persisted messages. The API stores accounts, sessions, conversations, and messages in SQLite. Passwords use Argon2id and bearer session values are stored as SHA-256 digests.
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for milestones and the feature status matrix.
+This is an early, single-user development foundation. Email verification, account recovery, multi-factor authentication, friend discovery, conversations between separate accounts, multi-device synchronization, real-time delivery, attachments, moderation, voice/video, and platform installers are not implemented. Do not expose this local service to the public internet or use it for production accounts.
+
+See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed feature matrix and remaining work.
+
+## Requirements
+
+- Node.js 22.12 or later
+- npm
 
 ## Run locally
-
-Requirements: Node.js 22.12+.
 
 ```sh
 npm install
 npm run dev
 ```
 
-Create a production client build with `npm run build`.
+The client runs at `http://localhost:5173`; the API runs at `http://localhost:8787`. SQLite data is stored under `data/`. Set `PROSA_DATA_DIR` or `PORT` to change the API data location or port. Set `CLIENT_ORIGIN` to a comma-separated list of allowed browser origins when developing with another client origin.
+
+Create a client production build with `npm run build`. Start the API separately with `npm run api:start`.
 
 ## License
 

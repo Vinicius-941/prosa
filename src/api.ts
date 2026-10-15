@@ -1,0 +1,42 @@
+export type ProsaUser = { id: string; username: string; displayName: string }
+export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null }
+export type ApiMessage = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string }
+type AuthResult = { token: string; user: ProsaUser }
+
+const tokenKey = 'prosa.session'
+const base = import.meta.env.VITE_API_URL ?? '/api'
+
+function sessionToken() { return localStorage.getItem(tokenKey) }
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers)
+  if (options.body) headers.set('content-type', 'application/json')
+  const token = sessionToken()
+  if (token) headers.set('authorization', `Bearer ${token}`)
+  const response = await fetch(`${base}${path}`, { ...options, headers })
+  if (!response.ok) {
+    const result = await response.json().catch(() => ({})) as { error?: string }
+    throw new Error(result.error ?? `Falha na solicitação (${response.status}).`)
+  }
+  if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
+export const api = {
+  async register(username: string, displayName: string, password: string) {
+    const result = await request<AuthResult>('/auth/register', { method: 'POST', body: JSON.stringify({ username, displayName, password }) })
+    localStorage.setItem(tokenKey, result.token)
+    return result.user
+  },
+  async login(username: string, password: string) {
+    const result = await request<AuthResult>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) })
+    localStorage.setItem(tokenKey, result.token)
+    return result.user
+  },
+  me: () => request<{ user: ProsaUser }>('/me'),
+  logout: async () => { try { await request('/auth/logout', { method: 'POST' }) } finally { localStorage.removeItem(tokenKey) } },
+  conversations: () => request<{ conversations: ApiConversation[] }>('/conversations'),
+  messages: (id: string) => request<{ messages: ApiMessage[] }>(`/conversations/${encodeURIComponent(id)}/messages`),
+  sendMessage: (id: string, text: string) => request<{ message: ApiMessage }>(`/conversations/${encodeURIComponent(id)}/messages`, { method: 'POST', body: JSON.stringify({ text }) }),
+  hasSession: () => Boolean(sessionToken()),
+}

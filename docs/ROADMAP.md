@@ -1,30 +1,33 @@
-# Prosa roadmap
+# Prosa delivery status
 
-This is a working status record. A feature is only marked complete when its real behavior has been implemented and verified.
+A feature is marked implemented only when the behavior exists in the application and has been checked against its stated scope.
 
-| Area | Status | Evidence / next step |
+| Area | Status | Evidence / remaining work |
 | --- | --- | --- |
-| Responsive conversation workspace | Implemented (client foundation) | React client build; responsive rail, conversation list, and chat view |
-| Conversation search and unread filter | Implemented (client foundation) | Filters seeded conversations in the current client |
-| Message composition | Local only | Appends to in-memory client state; implement API and persistent storage |
-| Accounts and identity | Not implemented | Design secure account and session services |
-| Friend requests and private groups | Not implemented | Define identity and relationship model |
-| Persistent real-time messaging | Not implemented | Backend, database, authorization, and live event delivery required |
-| Communities, channels, roles, moderation | Not implemented | Define data model and server-side permissions |
-| Attachments and media storage | Not implemented | Add validated uploads and object storage |
+| Responsive conversation workspace | Implemented | React client with desktop and narrow-screen layouts |
+| Account creation and sign-in | Implemented (local foundation) | API uses Argon2id password hashes; needs email verification, recovery, MFA, and security review |
+| Session creation and revocation | Implemented (local foundation) | Random bearer value, digest stored in SQLite, 30-day expiry, logout endpoint; add device/session management and CSRF/origin review |
+| Conversation listing | Implemented (personal conversation only) | Each new account receives a private starter conversation; no cross-account discovery yet |
+| Persistent message create and history | Implemented (personal conversation only) | API writes messages into SQLite; HTTP validation confirmed a sent message is returned from history |
+| Search and unread states | Not implemented | Search currently needs server-backed records and unread state model |
+| Friends and multi-account private conversations | Not implemented | Relationship model, authorization, invitation flow, and integration coverage required |
+| Real-time message delivery | Not implemented | Add authenticated event transport, reconnect/resume, and delivery state |
+| Communities, channels, roles, moderation | Not implemented | Data model and server-side authorization required |
+| Attachments and media storage | Not implemented | Safe upload validation, limits, scanning policy, and object storage required |
 | Voice, video, and screen sharing | Not implemented | Evaluate WebRTC/SFU architecture and platform support |
-| Desktop installers | Not implemented | Select packaging/runtime and set up Windows build |
+| Desktop installers | Not implemented | Select packaging/runtime and validate signed Windows build |
 | Linux packages | Not implemented | Add Linux CI builds and validate artifacts |
-| Android client | Not implemented | Assess native/mobile requirements and implement adapted client |
-| Security and privacy | Not implemented | Threat model, secure authentication, privacy controls, and review |
-| Performance benchmarks | Not implemented | Establish reproducible workloads and measure real builds |
+| Android client | Not implemented | Design and implement an adapted mobile experience |
+| Security and privacy review | In progress | Baseline password hashing, rate-limited auth endpoints, security headers, input limits; comprehensive threat model, transport deployment, data controls and independent review remain |
+| Performance benchmarks | Not implemented | Define reproducible workloads and measure actual desktop, server, and mobile builds |
+| CI and release artifacts | Not implemented | Add build matrix, dependency review, checksums, and release instructions |
 
 ## Milestones
 
-1. Client foundation and product decisions.
-2. Accounts, identity, persistent messaging, and a real-time backend.
+1. Client foundation and local account/message persistence. **In progress.**
+2. Multi-account identity, relationships, and authenticated real-time messaging.
 3. Communities, files, and moderation.
-4. Voice/video and adapted mobile clients.
-5. Security review, platform packaging, CI, benchmarks, and release process.
+4. Voice/video and adapted desktop, Linux, and Android clients.
+5. Security review, automated platform builds, benchmarks, and release process.
 
-No release readiness or feature parity is implied by the current interface foundation.
+The local SQLite service is for development and is not configured for production hosting. Current scope and limitations must remain visible in user-facing documentation.
