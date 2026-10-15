@@ -71,6 +71,9 @@ db.exec(`
     PRIMARY KEY (conversation_id, user_id)
   );
 `)
+const messageColumns = db.pragma('table_info(messages)') as { name: string }[]
+if (!messageColumns.some(column => column.name === 'edited_at')) db.exec('ALTER TABLE messages ADD COLUMN edited_at TEXT')
+if (!messageColumns.some(column => column.name === 'deleted_at')) db.exec('ALTER TABLE messages ADD COLUMN deleted_at TEXT')
 const sessionColumns = db.pragma('table_info(sessions)') as { name: string }[]
 if (!sessionColumns.some(column => column.name === 'id')) db.exec("ALTER TABLE sessions ADD COLUMN id TEXT NOT NULL DEFAULT ''")
 if (!sessionColumns.some(column => column.name === 'label')) db.exec("ALTER TABLE sessions ADD COLUMN label TEXT NOT NULL DEFAULT 'Dispositivo'")
@@ -431,7 +434,7 @@ app.get('/api/messages/search', requireAuth, (req: AuthRequest, res) => {
     FROM messages m JOIN conversations c ON c.id = m.conversation_id
     JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = @me
     JOIN users u ON u.id = m.author_id
-    WHERE m.body LIKE @pattern ESCAPE '!'
+    WHERE m.deleted_at IS NULL AND m.body LIKE @pattern ESCAPE '!'
       AND ((c.kind = 'channel' AND EXISTS (SELECT 1 FROM community_channels cc JOIN community_members cm
         ON cm.community_id = cc.community_id WHERE cc.conversation_id = c.id AND cm.user_id = @me))
         OR (c.kind <> 'channel' AND (c.kind <> 'direct' OR EXISTS (
@@ -529,8 +532,8 @@ app.get('/api/conversations', requireAuth, (req: AuthRequest, res) => {
     CASE WHEN c.kind = 'direct' THEN (SELECT u.username FROM conversation_members other JOIN users u ON u.id = other.user_id
       WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) END AS peerUsername,
     community.id AS communityId, community.name AS communityName, cc.name AS channelName,
-    (SELECT m.body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview,
-    (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS lastMessageAt
+    (SELECT m.body FROM messages m WHERE m.conversation_id = c.id AND m.deleted_at IS NULL ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview,
+    (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id AND m.deleted_at IS NULL ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS lastMessageAt
     ,(SELECT COUNT(*) FROM messages unread WHERE unread.conversation_id = c.id AND unread.author_id <> @me
       AND unread.rowid > COALESCE((SELECT cr.last_read_rowid FROM conversation_reads cr
         WHERE cr.conversation_id = c.id AND cr.user_id = @me), 0)) AS unreadCount
@@ -571,18 +574,18 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
   }
   const rows = pivot
     ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt
         FROM messages m JOIN users u ON u.id = m.author_id
         WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid <= ?))
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, pivot.createdAt, pivot.createdAt, pivot.sequence, limit + 1) as (ApiMessageRow & { sequence: number })[]
     : before
     ? db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt
         FROM messages m JOIN users u ON u.id = m.author_id
         WHERE m.conversation_id = ? AND (m.created_at < ? OR (m.created_at = ? AND m.rowid < ?))
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, before.createdAt, before.createdAt, before.rowid, limit + 1) as (ApiMessageRow & { sequence: number })[]
     : db.prepare(`SELECT m.rowid AS sequence, m.id, m.conversation_id AS conversationId, m.author_id AS authorId,
-        u.display_name AS author, m.body AS text, m.created_at AS createdAt
+        u.display_name AS author, m.body AS text, m.created_at AS createdAt, m.edited_at AS editedAt, m.deleted_at AS deletedAt
         FROM messages m JOIN users u ON u.id = m.author_id WHERE m.conversation_id = ?
         ORDER BY m.created_at DESC, m.rowid DESC LIMIT ?`).all(req.params.id, limit + 1) as (ApiMessageRow & { sequence: number })[]
   const hasOlder = rows.length > limit
@@ -595,7 +598,7 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
   return res.json({ messages, nextCursor })
 })
 
-type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string }
+type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null }
 
 app.post('/api/conversations/:id/read', requireAuth, (req: AuthRequest, res) => {
   if (!canAccessConversation(req.params.id, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
@@ -614,10 +617,48 @@ app.post('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res)
   const id = randomBytes(16).toString('hex')
   const createdAt = new Date().toISOString()
   db.prepare('INSERT INTO messages (id, conversation_id, author_id, body, created_at) VALUES (?, ?, ?, ?, ?)').run(id, req.params.id, req.user!.id, text, createdAt)
-  const message = { id, conversationId: req.params.id, authorId: req.user!.id, author: req.user!.displayName, text, createdAt }
+  const message = { id, conversationId: req.params.id, authorId: req.user!.id, author: req.user!.displayName, text, createdAt, editedAt: null, deletedAt: null }
   const recipients = db.prepare('SELECT user_id AS userId FROM conversation_members WHERE conversation_id = ?').all(req.params.id) as { userId: string }[]
   for (const recipient of recipients) io.to(`user:${recipient.userId}`).emit('message:new', message)
   return res.status(201).json({ message })
+})
+
+app.patch('/api/conversations/:conversationId/messages/:messageId', requireAuth, (req: AuthRequest, res) => {
+  const { conversationId, messageId } = req.params
+  if (!canAccessConversation(conversationId, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
+  const message = db.prepare(`SELECT id, conversation_id AS conversationId, author_id AS authorId, body AS text,
+    created_at AS createdAt, edited_at AS editedAt, deleted_at AS deletedAt FROM messages WHERE id = ? AND conversation_id = ?`)
+    .get(messageId, conversationId) as Omit<ApiMessageRow, 'author'> | undefined
+  if (!message) return res.status(404).json({ error: 'Mensagem não encontrada.' })
+  if (message.authorId !== req.user!.id) return res.status(403).json({ error: 'Você só pode editar suas próprias mensagens.' })
+  if (message.deletedAt) return res.status(409).json({ error: 'Essa mensagem já foi removida.' })
+  const text = typeof req.body?.text === 'string' ? req.body.text.trim() : ''
+  if (text.length < 1 || text.length > 4000) return res.status(400).json({ error: 'A mensagem deve ter entre 1 e 4.000 caracteres.' })
+  const editedAt = new Date().toISOString()
+  const updateResult = db.prepare('UPDATE messages SET body = ?, edited_at = ? WHERE id = ? AND author_id = ? AND deleted_at IS NULL').run(text, editedAt, messageId, req.user!.id)
+  if (!updateResult.changes) return res.status(409).json({ error: 'A mensagem já foi removida.' })
+  const updated = { ...message, author: req.user!.displayName, text, editedAt }
+  const recipients = db.prepare('SELECT user_id AS userId FROM conversation_members WHERE conversation_id = ?').all(conversationId) as { userId: string }[]
+  for (const recipient of recipients) io.to(`user:${recipient.userId}`).emit('message:updated', updated)
+  return res.json({ message: updated })
+})
+
+app.delete('/api/conversations/:conversationId/messages/:messageId', requireAuth, (req: AuthRequest, res) => {
+  const { conversationId, messageId } = req.params
+  const isMember = db.prepare('SELECT 1 FROM conversation_members WHERE conversation_id = ? AND user_id = ?').get(conversationId, req.user!.id)
+  if (!isMember) return res.status(404).json({ error: 'Conversa não encontrada.' })
+  const message = db.prepare('SELECT id, author_id AS authorId, deleted_at AS deletedAt FROM messages WHERE id = ? AND conversation_id = ?')
+    .get(messageId, conversationId) as { id: string; authorId: string; deletedAt: string | null } | undefined
+  if (!message) return res.status(404).json({ error: 'Mensagem não encontrada.' })
+  if (message.authorId !== req.user!.id) return res.status(403).json({ error: 'Você só pode remover suas próprias mensagens.' })
+  if (message.deletedAt) return res.status(409).json({ error: 'Essa mensagem já foi removida.' })
+  const deletedAt = new Date().toISOString()
+  const deleteResult = db.prepare("UPDATE messages SET body = '', deleted_at = ? WHERE id = ? AND author_id = ? AND deleted_at IS NULL").run(deletedAt, messageId, req.user!.id)
+  if (!deleteResult.changes) return res.status(409).json({ error: 'A mensagem já foi removida.' })
+  const event = { id: messageId, conversationId, authorId: req.user!.id, deletedAt }
+  const recipients = db.prepare('SELECT user_id AS userId FROM conversation_members WHERE conversation_id = ?').all(conversationId) as { userId: string }[]
+  for (const recipient of recipients) io.to(`user:${recipient.userId}`).emit('message:deleted', event)
+  return res.status(204).end()
 })
 
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

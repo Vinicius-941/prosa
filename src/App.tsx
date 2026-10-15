@@ -3,7 +3,7 @@ import './App.css'
 import { api, type ApiCommunity, type ApiConversation, type ApiFriendData, type ApiMessage, type ApiMessageSearchResult, type ApiPerson, type ApiSession, type ProsaUser } from './api'
 import { io } from 'socket.io-client'
 
-type Message = { id: string; author: string; time: string; text: string; mine?: boolean }
+type Message = { id: string; author: string; time: string; text: string; mine?: boolean; edited?: boolean; deleted?: boolean }
 type Conversation = { id: string; name: string; handle: string; initials: string; color: string; online?: boolean; preview: string; time: string; unreadCount: number; olderCursor: string | null; communityId: string | null; communityName: string | null; messages: Message[] }
 
 function localTime(value: string) {
@@ -11,7 +11,7 @@ function localTime(value: string) {
 }
 
 function fromApiMessage(message: ApiMessage, user: ProsaUser): Message {
-  return { id: message.id, author: message.authorId === user.id ? 'Você' : message.author, time: localTime(message.createdAt), text: message.text, mine: message.authorId === user.id }
+  return { id: message.id, author: message.authorId === user.id ? 'Você' : message.author, time: localTime(message.createdAt), text: message.text, mine: message.authorId === user.id, edited: Boolean(message.editedAt), deleted: Boolean(message.deletedAt) }
 }
 
 function fromApiConversation(conversation: ApiConversation, page: { messages: ApiMessage[]; nextCursor: string | null }, user: ProsaUser): Conversation {
@@ -41,6 +41,8 @@ function App() {
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<{ query: string; userId: string; messages: ApiMessageSearchResult[] } | null>(null)
   const [draft, setDraft] = useState('')
+  const [editingMessageId, setEditingMessageId] = useState('')
+  const [editDraft, setEditDraft] = useState('')
   const [notice, setNotice] = useState('')
   const [user, setUser] = useState<ProsaUser | null>(null)
   const [people, setPeople] = useState<ApiFriendData>({ friends: [], incoming: [], outgoing: [] })
@@ -190,6 +192,20 @@ function App() {
       if (isOpen && message.authorId !== user.id) void api.markRead(message.conversationId).catch(() => undefined)
       if (!found) void refreshConversations(user).catch(() => undefined)
     })
+    socket.on('message:updated', (message: ApiMessage) => {
+      const mapped = fromApiMessage(message, user)
+      setChats(current => current.map(chat => chat.id !== message.conversationId ? chat : {
+        ...chat, preview: chat.messages.at(-1)?.id === message.id ? message.text : chat.preview,
+        messages: chat.messages.map(existing => existing.id === message.id ? mapped : existing),
+      }))
+    })
+    socket.on('message:deleted', (event: { id: string; conversationId: string }) => {
+      setChats(current => current.map(chat => chat.id !== event.conversationId ? chat : {
+        ...chat, preview: chat.messages.at(-1)?.id === event.id ? 'Mensagem removida' : chat.preview,
+        messages: chat.messages.map(existing => existing.id === event.id ? { ...existing, text: '', deleted: true } : existing),
+      }))
+      setSearchResults(current => current ? { ...current, messages: current.messages.filter(message => message.id !== event.id) } : current)
+    })
     return () => { socket.emit('conversation:leave', activeConversationId); socket.disconnect() }
   }, [activeConversationId, user])
 
@@ -304,6 +320,34 @@ function App() {
     } catch (error) { setNotice(error instanceof Error ? error.message : 'A mensagem não foi enviada.') }
   }
 
+  async function saveMessageEdit(event: FormEvent) {
+    event.preventDefault()
+    if (!active || !editingMessageId) return
+    try {
+      const { message } = await api.updateMessage(active.id, editingMessageId, editDraft)
+      if (user) {
+        const mapped = fromApiMessage(message, user)
+        setChats(current => current.map(chat => chat.id !== active.id ? chat : {
+          ...chat, preview: chat.messages.at(-1)?.id === message.id ? message.text : chat.preview,
+          messages: chat.messages.map(existing => existing.id === message.id ? mapped : existing),
+        }))
+      }
+      setEditingMessageId(''); setEditDraft('')
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'A mensagem não foi editada.') }
+  }
+
+  async function removeMessage(messageId: string) {
+    if (!active) return
+    try {
+      await api.deleteMessage(active.id, messageId)
+      setChats(current => current.map(chat => chat.id !== active.id ? chat : {
+        ...chat, preview: chat.messages.at(-1)?.id === messageId ? 'Mensagem removida' : chat.preview,
+        messages: chat.messages.map(message => message.id === messageId ? { ...message, text: '', deleted: true } : message),
+      }))
+      setSearchResults(current => current ? { ...current, messages: current.messages.filter(message => message.id !== messageId) } : current)
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'A mensagem não foi removida.') }
+  }
+
   async function openConversation(id: string, targetMessageId?: string) {
     setActiveView('messages')
     setActiveId(id)
@@ -389,7 +433,7 @@ function App() {
       <div className="message-scroll" ref={messageScrollRef} onScroll={event => { const element = event.currentTarget; nearBottomRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 100 }}><div className="day-divider"><span>HISTÓRICO</span></div>{active.olderCursor && <button className="load-older" disabled={loadingOlder} onClick={() => void loadOlderMessages()}>{loadingOlder ? 'Carregando…' : 'Carregar mensagens anteriores'}</button>}<div className="messages">{active.messages.map((message, index) => {
         const previous = active.messages[index - 1]
         const grouped = previous?.author === message.author
-        return <article key={message.id} data-message-id={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}<p>{message.text}</p></div></article>
+        return <article key={message.id} data-message-id={message.id} className={`message ${message.mine ? 'mine' : ''} ${grouped ? 'grouped' : ''}`}><div className="message-avatar-slot">{!grouped && <span className={`avatar tiny ${message.mine ? 'self' : active.color}`}>{message.mine ? 'V' : message.author.split(' ').map(part => part[0]).join('').slice(0, 2)}</span>}</div><div className="message-body">{!grouped && <div className="message-meta"><strong>{message.mine ? 'Você' : message.author}</strong><time>{message.time}</time></div>}{editingMessageId === message.id ? <form className="message-edit-form" onSubmit={saveMessageEdit}><textarea aria-label="Editar mensagem" maxLength={4000} value={editDraft} onChange={event => setEditDraft(event.target.value)} autoFocus /><div><button type="button" onClick={() => { setEditingMessageId(''); setEditDraft('') }}>Cancelar</button><button type="submit" disabled={!editDraft.trim()}>Salvar</button></div></form> : <><p className={message.deleted ? 'message-deleted' : undefined}>{message.deleted ? 'Esta mensagem foi removida.' : message.text}{message.edited && !message.deleted && <small className="message-edited"> editada</small>}</p>{message.mine && !message.deleted && <div className="message-actions"><button onClick={() => { setEditingMessageId(message.id); setEditDraft(message.text) }}>Editar</button><button onClick={() => void removeMessage(message.id)}>Remover</button></div>}</>}</div></article>
       })}</div></div>
       <form className="composer" onSubmit={sendMessage}><button type="button" className="composer-tool attach" aria-label="Anexar arquivo" onClick={() => setNotice('O envio de arquivos será ativado com o armazenamento do Prosa.')}><Icon name="paperclip" size={19} /></button><input aria-label="Escrever mensagem" value={draft} onChange={event => setDraft(event.target.value)} placeholder={`Escreva para ${active.name.split(' ')[0]}...`} /><button type="button" className="composer-tool" aria-label="Emoji" onClick={() => setDraft(value => `${value} ✨`)}><Icon name="smile" size={19} /></button><button type="submit" className="send-button" aria-label="Enviar mensagem" disabled={!draft.trim()}><Icon name="send" size={17} /></button></form>
       <footer className="chat-footnote">Mensagens salvas no banco local do Prosa.</footer></> : <div className="empty-chat"><span className="auth-brand">p</span><h2>Seu Prosa está pronto.</h2><p>Encontre pessoas pelo nome de usuário para começar uma conversa.</p><button className="auth-submit" onClick={() => { setAddContactOpen(true); setPeopleQuery(''); setPeopleResults([]) }}>Encontrar pessoas</button></div>}

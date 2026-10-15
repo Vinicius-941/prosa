@@ -190,7 +190,7 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
       const timeout = setTimeout(() => reject(new Error('Timed out waiting for a live message')), 3000)
       brunoSocket.once('message:new', message => { clearTimeout(timeout); resolve(message) })
     })
-    const sent = await request<{ message: { text: string } }>(`/conversations/${accepted.conversationId}/messages`, alice.token, {
+    const sent = await request<{ message: { id: string; text: string } }>(`/conversations/${accepted.conversationId}/messages`, alice.token, {
       method: 'POST', body: JSON.stringify({ text: 'Mensagem em tempo real' }),
     })
     assert.equal(sent.message.text, 'Mensagem em tempo real')
@@ -198,6 +198,35 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
 
     const history = await request<{ messages: { text: string }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
     assert.equal(history.messages.at(-1)?.text, sent.message.text)
+
+    const forbiddenEdit = await fetch(`${origin}/api/conversations/${accepted.conversationId}/messages/${sent.message.id}`, {
+      method: 'PATCH', headers: { authorization: `Bearer ${bruno.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ text: 'Alteração indevida' }),
+    })
+    assert.equal(forbiddenEdit.status, 403)
+    const liveUpdate = new Promise<{ id: string; text: string; editedAt: string | null }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for a message update')), 3000)
+      brunoSocket.once('message:updated', message => { clearTimeout(timeout); resolve(message) })
+    })
+    const edited = await request<{ message: { id: string; text: string; editedAt: string | null } }>(`/conversations/${accepted.conversationId}/messages/${sent.message.id}`, alice.token, {
+      method: 'PATCH', body: JSON.stringify({ text: 'Mensagem atualizada' }),
+    })
+    assert.equal(edited.message.text, 'Mensagem atualizada')
+    assert.ok(edited.message.editedAt)
+    assert.equal((await liveUpdate).text, edited.message.text)
+    const liveDelete = new Promise<{ id: string; conversationId: string; deletedAt: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for a message removal')), 3000)
+      brunoSocket.once('message:deleted', message => { clearTimeout(timeout); resolve(message) })
+    })
+    const forbiddenDelete = await fetch(`${origin}/api/conversations/${accepted.conversationId}/messages/${sent.message.id}`, {
+      method: 'DELETE', headers: { authorization: `Bearer ${bruno.token}` },
+    })
+    assert.equal(forbiddenDelete.status, 403)
+    await request<void>(`/conversations/${accepted.conversationId}/messages/${sent.message.id}`, alice.token, { method: 'DELETE' })
+    assert.equal((await liveDelete).id, sent.message.id)
+    const removedHistory = await request<{ messages: { id: string; text: string; deletedAt: string | null }[] }>(`/conversations/${accepted.conversationId}/messages`, bruno.token)
+    const removed = removedHistory.messages.find(message => message.id === sent.message.id)
+    assert.equal(removed?.text, '')
+    assert.ok(removed?.deletedAt)
 
     const deniedJoin = await new Promise<{ ok: boolean }>((resolve, reject) => {
       const carlaSocket = connectSocket(origin, { auth: { token: carla.token }, reconnection: false })
