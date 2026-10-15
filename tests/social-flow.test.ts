@@ -22,6 +22,9 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   assert.ok(address && typeof address !== 'string')
   const origin = `http://127.0.0.1:${address.port}`
   const base = `${origin}/api`
+  const health = await fetch(`${base}/health`)
+  assert.equal(health.status, 200)
+  assert.deepEqual(await health.json(), { status: 'ok', service: 'prosa' })
   const tag = Math.random().toString(36).slice(2, 10)
 
   async function sendHttp(route: string, token?: string, init: RequestInit = {}) {

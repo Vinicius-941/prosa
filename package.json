@@ -18,7 +18,8 @@
     "desktop:dev": "npm run build:desktop && electron .",
     "package:desktop": "npm run build:desktop && electron-builder --dir",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "api:start:prod": "node dist-server/index.cjs"
   },
   "build": {
     "appId": "app.prosa.desktop",

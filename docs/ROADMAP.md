@@ -22,6 +22,7 @@ A feature is marked implemented only when the behavior exists in the application
 | Windows installers | Implemented (early) | NSIS installer build is wired into Windows CI and tagged releases; signing and clean-machine install/upgrade checks remain |
 | Linux packages | Implemented (early) | AppImage and Debian targets are wired into Linux tagged releases; clean-machine launch and upgrade checks remain |
 | Android client | Not implemented | Design and implement an adapted mobile experience |
+| Service operations foundation | Implemented (early) | Production origin validation, health endpoint checks SQLite, graceful process shutdown, persistent-directory example and production start script; deployment, TLS, backups, multi-instance design, monitoring and security review remain |
 | Security and privacy review | In progress | Baseline password hashing, rate-limited auth endpoints, security headers, input limits; comprehensive threat model, transport deployment, data controls and independent review remain |
 | Performance benchmarks | Not implemented | Define reproducible workloads and measure actual desktop, server, and mobile builds |
 | CI checks | Implemented | `.github/workflows/ci.yml` runs integration checks, lint, client/service builds, and unpacked desktop packaging on Windows and Linux |
@@ -35,4 +36,4 @@ A feature is marked implemented only when the behavior exists in the application
 4. Voice/video and adapted Android client; validate desktop and Linux packages.
 5. Security review, automated platform builds, benchmarks, and release process.
 
-The SQLite service remains local to each desktop installation and is not configured for multi-device or public hosting. Current scope and limitations must remain visible in user-facing documentation.
+The desktop SQLite service remains local to each installation. The server now has production configuration checks and lifecycle hooks, but no multi-device or public hosting environment has been provisioned. Current scope and limitations must remain visible in user-facing documentation.

@@ -17,7 +17,7 @@ See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed feature matrix and remai
 
 ## Desktop app
 
-Build and open the desktop app with `npm run desktop:dev`. The desktop shell starts the API on a random local port, binds it to this device, and stores SQLite data in the operating system's Prosa application-data folder. Browser development continues to use `npm run dev` and `data/`.
+Build and open the desktop app with `npm run desktop:dev`. The desktop shell starts the API on a random local port, binds it to this device, and stores SQLite data in the operating system's Prosa application-data folder. This is a single-device local account store. Browser development continues to use `npm run dev` and `data/`.
 
 Create an unpacked desktop build for the current system with `npm run package:desktop`. GitHub Actions checks the Windows and Linux packages on every update. A version tag (`v*`) builds the Windows installer, Linux AppImage, and Debian package and attaches them to a GitHub release. Release installers are currently unsigned and may show an operating-system publisher warning.
 
@@ -30,7 +30,13 @@ npm run dev
 
 The client runs at `http://localhost:5173`; the API runs at `http://localhost:8787`. SQLite data is stored under `data/`. Set `PROSA_DATA_DIR`, `PORT`, or `HOST` to change the API data location, port, or listen address. The service binds to this device by default; set `CLIENT_ORIGIN` to a comma-separated list of allowed browser origins when developing with another client origin.
 
-Create a client production build with `npm run build`. Start the API separately with `npm run api:start`.
+Create a client and service production build with `npm run build:desktop`. Start the API separately with `npm run api:start` during development.
+
+## Service deployment foundation
+
+A production start command is available with `npm run api:start:prod` after `npm run build:service`. Copy `.env.example` to `.env` and set `NODE_ENV=production`, a persistent absolute `PROSA_DATA_DIR`, a valid `PORT`, and `CLIENT_ORIGIN` to the exact browser origins that should be accepted. Production startup rejects a missing or wildcard origin configuration, and `HOST` defaults to the local-only address unless explicitly set by the deployment environment. The API handles `SIGINT` and `SIGTERM` by stopping new connections before closing the database. `GET /api/health` checks the database connection and returns 503 when it is unavailable.
+
+This is deployment preparation, not a hosted service. No public server, TLS endpoint, backups, migration procedure, multi-instance storage, or monitoring account is configured by this repository. Keep the API behind a TLS-terminating reverse proxy and use persistent, backed-up storage before onboarding accounts.
 
 Run the account, connection-request, access-control, message-persistence, and live-delivery integration check with `npm test`.
 

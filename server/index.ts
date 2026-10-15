@@ -13,6 +13,14 @@ import { Server } from 'socket.io'
 
 const port = Number(process.env.PORT ?? 8787)
 const host = process.env.HOST ?? '127.0.0.1'
+const production = process.env.NODE_ENV === 'production'
+const configuredOrigins = process.env.CLIENT_ORIGIN?.split(',').map(origin => origin.trim()).filter(Boolean)
+if (production && (!configuredOrigins?.length || configuredOrigins.includes('*'))) {
+  throw new Error('Em produção, CLIENT_ORIGIN precisa listar origens específicas e permitidas.')
+}
+if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT precisa ser uma porta válida entre 0 e 65535.')
+if (production && port === 0) throw new Error('PORT 0 não é permitido em produção.')
+const allowedOrigins = configuredOrigins?.length ? configuredOrigins : ['http://localhost:5173']
 const dataDir = path.resolve(process.env.PROSA_DATA_DIR ?? 'data')
 mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'prosa.sqlite'))
@@ -112,7 +120,6 @@ db.exec(`
 const app = express()
 app.disable('x-powered-by')
 app.use(helmet())
-const allowedOrigins = process.env.CLIENT_ORIGIN?.split(',') ?? ['http://localhost:5173']
 app.use(cors({ origin: allowedOrigins }))
 app.use(express.json({ limit: '32kb' }))
 app.use('/api/auth', rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false }))
@@ -183,7 +190,14 @@ function canAccessConversation(conversationId: string, userId: string) {
     WHERE peer.conversation_id = ? AND peer.user_id <> ? LIMIT 1`).get(userId, userId, conversationId, userId))
 }
 
-app.get('/api/health', (_req, res) => res.json({ status: 'ok', service: 'prosa' }))
+app.get('/api/health', (_req, res) => {
+  try {
+    db.prepare('SELECT 1').get()
+    return res.json({ status: 'ok', service: 'prosa' })
+  } catch {
+    return res.status(503).json({ status: 'unavailable', service: 'prosa' })
+  }
+})
 
 app.post('/api/auth/register', async (req, res, next) => {
   try {
@@ -538,10 +552,22 @@ app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: 'O serviço encontrou um erro inesperado.' })
 })
 
-if (process.env.PROSA_NO_LISTEN !== '1') httpServer.listen(port, host, () => {
-  const address = httpServer.address()
-  const activePort = address && typeof address !== 'string' ? address.port : port
-  console.log(`Prosa API listening on http://${host}:${activePort}`)
-})
+if (process.env.PROSA_NO_LISTEN !== '1') {
+  httpServer.listen(port, host, () => {
+    const address = httpServer.address()
+    const activePort = address && typeof address !== 'string' ? address.port : port
+    console.log(`Prosa API listening on http://${host}:${activePort}`)
+  })
+  const shutdown = () => {
+    httpServer.close(() => {
+      io.close()
+      db.close()
+      process.exit(0)
+    })
+    setTimeout(() => process.exit(1), 10_000).unref()
+  }
+  process.once('SIGINT', shutdown)
+  process.once('SIGTERM', shutdown)
+}
 
 export { app, db, httpServer, io }
