@@ -4,7 +4,7 @@ Prosa is an independent communication app focused on clear, welcoming conversati
 
 ## Current status
 
-The client supports account creation, sign-in, per-device active-session listing and revocation, password changes that disconnect other sessions, user discovery, connection requests, direct conversations between connected accounts, invite-based communities and text channels, authenticated message search, and persisted messages delivered over a live connection. The API stores accounts, sessions, connections, conversations, and messages in SQLite. Passwords use Argon2id and bearer session values are stored as SHA-256 digests.
+The client supports account creation, sign-in, per-device active-session listing and revocation, password changes that disconnect other sessions, JSON data export, password-confirmed account deletion, user discovery, connection requests, direct conversations between connected accounts, invite-based communities and text channels, authenticated message search, and persisted messages delivered over a live connection. The API stores accounts, sessions, connections, conversations, and messages in SQLite. Passwords use Argon2id and bearer session values are stored as SHA-256 digests.
 
 This is an early development foundation. Email verification, account recovery, multi-factor authentication, shared multi-device synchronization, attachments, moderation, and voice/video are not implemented. Android is available as a debug preview and requires a separately hosted API.
 
@@ -43,6 +43,8 @@ A production start command is available with `npm run api:start:prod` after `npm
 `deploy/compose.yaml` provides a single-server Docker deployment with persistent SQLite storage and Caddy-managed HTTPS. Follow [docs/deployment.md](docs/deployment.md) to set a domain and allowed origins before starting it. This repository does not provision or operate the server; the operator must configure DNS, network access, off-server backups, and restore checks. The SQLite deployment supports one API instance.
 
 Run the account, connection-request, access-control, message-persistence, and live-delivery integration check with `npm test`.
+
+Account export and deletion behavior is described in [docs/account-data.md](docs/account-data.md).
 
 Run a reproducible local API write benchmark with `npm run benchmark:service -- --messages=300 --concurrency=10`. Methodology and measurement limits are described in [benchmarks/README.md](benchmarks/README.md); each run prints its actual measurements as JSON.
 

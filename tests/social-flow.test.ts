@@ -255,6 +255,41 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(revokedSearch.messages.length, 0)
     const removedConversations = await request<{ conversations: { id: string }[] }>('/conversations', bruno.token)
     assert.ok(!removedConversations.conversations.some(item => item.id === accepted.conversationId))
+
+    assert.equal((await sendHttp('/account/export')).status, 401)
+    const exportResponse = await sendHttp('/account/export', alice.token)
+    assert.equal(exportResponse.status, 200)
+    assert.equal(exportResponse.headers.get('cache-control'), 'no-store')
+    assert.match(exportResponse.headers.get('content-disposition') ?? '', /prosa-account-export\.json/)
+    const accountExport = await exportResponse.json() as { profile: { username: string }; sessions: { label: string }[]; communities: { id: string; role: string; channels: { name: string }[] }[]; conversations: { messages: { text: string }[] }[] }
+    assert.equal(accountExport.profile.username, alice.user.username)
+    assert.ok(accountExport.sessions.length >= 1)
+    assert.ok(accountExport.communities.some(community => community.id === newCommunity.community.id && community.role === 'owner' && community.channels.some(channel => channel.name === 'geral')))
+    assert.ok(accountExport.conversations.some(conversation => conversation.messages.some(message => message.text === 'Mensagem da comunidade')))
+    assert.ok(!JSON.stringify(accountExport).includes('passwordHash'))
+
+    const wrongDeletePassword = await sendHttp('/account', alice.token, { method: 'DELETE', body: JSON.stringify({ currentPassword: 'incorreta', confirmation: alice.user.username }) })
+    assert.equal(wrongDeletePassword.status, 401)
+    const wrongDeleteConfirmation = await sendHttp('/account', alice.token, { method: 'DELETE', body: JSON.stringify({ currentPassword: 'NovaSenhaSegura!2026', confirmation: 'nao-e-alice' }) })
+    assert.equal(wrongDeleteConfirmation.status, 400)
+    const deleted = await sendHttp('/account', alice.token, { method: 'DELETE', body: JSON.stringify({ currentPassword: 'NovaSenhaSegura!2026', confirmation: alice.user.username }) })
+    assert.equal(deleted.status, 204)
+    assert.equal((await sendHttp('/me', alice.token)).status, 401)
+    assert.equal(db.prepare('SELECT 1 FROM users WHERE id = ?').get(alice.user.id), undefined)
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM sessions WHERE user_id = ?').get(alice.user.id) as { count: number }).count, 0)
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM messages WHERE author_id = ?').get(alice.user.id) as { count: number }).count, 0)
+    const transferredCommunity = await request<{ communities: { id: string; role: string }[] }>('/communities', bruno.token)
+    assert.equal(transferredCommunity.communities.find(community => community.id === newCommunity.community.id)?.role, 'owner')
+    const erasedAuthorMessages = await request<{ messages: { text: string }[] }>(`/conversations/${generalChannel.conversationId}/messages`, bruno.token)
+    assert.equal(erasedAuthorMessages.messages.length, 0)
+
+    const soloCommunity = await request<{ community: { id: string } }>('/communities', carla.token, {
+      method: 'POST', body: JSON.stringify({ name: 'Espaço particular' }),
+    })
+    const deleteSoloOwner = await sendHttp('/account', carla.token, { method: 'DELETE', body: JSON.stringify({ currentPassword: 'SenhaDeIntegracao!2026', confirmation: carla.user.username }) })
+    assert.equal(deleteSoloOwner.status, 204)
+    assert.equal(db.prepare('SELECT 1 FROM communities WHERE id = ?').get(soloCommunity.community.id), undefined)
+    assert.equal((await sendHttp('/me', carla.token)).status, 401)
   } finally {
     brunoSocket.disconnect()
     await new Promise<void>(resolve => io.close(() => resolve()))

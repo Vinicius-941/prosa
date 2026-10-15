@@ -273,6 +273,91 @@ app.post('/api/auth/logout', requireAuth, (req: AuthRequest, res) => {
 
 app.get('/api/me', requireAuth, (req: AuthRequest, res) => res.json({ user: req.user }))
 
+app.get('/api/account/export', requireAuth, rateLimit({ windowMs: 10 * 60_000, limit: 2, keyGenerator: req => (req as AuthRequest).user!.id, standardHeaders: 'draft-8', legacyHeaders: false }), (req: AuthRequest, res) => {
+  const userId = req.user!.id
+  const profile = db.prepare(`SELECT id, username, display_name AS displayName, created_at AS createdAt
+    FROM users WHERE id = ?`).get(userId)
+  const sessions = db.prepare(`SELECT label, created_at AS createdAt, last_seen_at AS lastSeenAt, expires_at AS expiresAt
+    FROM sessions WHERE user_id = ? ORDER BY created_at`).all(userId)
+  const relationships = db.prepare(`SELECT u.username, u.display_name AS displayName, f.status,
+    CASE WHEN f.requester_id = ? THEN 'outgoing' ELSE 'incoming' END AS direction,
+    f.created_at AS createdAt, f.updated_at AS updatedAt
+    FROM friendships f JOIN users u ON u.id = CASE WHEN f.requester_id = ? THEN f.addressee_id ELSE f.requester_id END
+    WHERE f.requester_id = ? OR f.addressee_id = ? ORDER BY f.created_at`).all(userId, userId, userId, userId)
+  const conversationRows = db.prepare(`SELECT c.id, c.title, c.kind, c.created_at AS createdAt
+    FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
+    WHERE cm.user_id = ? ORDER BY c.created_at`).all(userId) as { id: string; title: string; kind: string; createdAt: string }[]
+  const accessibleConversations = conversationRows.filter(conversation => canAccessConversation(conversation.id, userId))
+  const conversations = accessibleConversations.map(conversation => ({
+    ...conversation,
+    participants: db.prepare(`SELECT u.username, u.display_name AS displayName FROM conversation_members cm
+      JOIN users u ON u.id = cm.user_id WHERE cm.conversation_id = ? ORDER BY u.username`).all(conversation.id),
+    messages: db.prepare(`SELECT u.username AS authorUsername, m.body AS text, m.created_at AS createdAt,
+      m.edited_at AS editedAt, m.deleted_at AS deletedAt FROM messages m JOIN users u ON u.id = m.author_id
+      WHERE m.conversation_id = ? ORDER BY m.rowid`).all(conversation.id),
+  }))
+  const memberships = db.prepare(`SELECT c.id, c.name, c.created_at AS createdAt, cm.role, cm.joined_at AS joinedAt,
+    CASE WHEN c.owner_id = ? THEN c.invite_code ELSE NULL END AS inviteCode
+    FROM community_members cm JOIN communities c ON c.id = cm.community_id
+    WHERE cm.user_id = ? ORDER BY cm.joined_at`).all(userId, userId) as { id: string; name: string; createdAt: string; role: string; joinedAt: string; inviteCode: string | null }[]
+  const communities = memberships.map(community => ({
+    ...community,
+    channels: db.prepare(`SELECT cc.name, cc.position, c.created_at AS createdAt FROM community_channels cc
+      JOIN conversations c ON c.id = cc.conversation_id WHERE cc.community_id = ? ORDER BY cc.position`).all(community.id),
+  }))
+  res.setHeader('Content-Type', 'application/json; charset=utf-8')
+  res.setHeader('Content-Disposition', 'attachment; filename="prosa-account-export.json"')
+  res.setHeader('Cache-Control', 'no-store')
+  return res.json({ exportedAt: new Date().toISOString(), profile, sessions, relationships, communities, conversations })
+})
+
+app.delete('/api/account', requireAuth, rateLimit({ windowMs: 60 * 60_000, limit: 3, keyGenerator: req => (req as AuthRequest).user!.id, standardHeaders: 'draft-8', legacyHeaders: false }), async (req: AuthRequest, res, next) => {
+  try {
+    const currentPassword = String(req.body?.currentPassword ?? '')
+    const confirmation = String(req.body?.confirmation ?? '').trim().toLowerCase()
+    const account = db.prepare('SELECT username, password_hash AS passwordHash FROM users WHERE id = ?').get(req.user!.id) as { username: string; passwordHash: string } | undefined
+    if (!account || !await argon2.verify(account.passwordHash, currentPassword).catch(() => false)) return res.status(401).json({ error: 'A senha atual está incorreta.' })
+    if (confirmation !== account.username) return res.status(400).json({ error: 'Digite seu nome de usuário para confirmar a exclusão.' })
+
+    const userId = req.user!.id
+    const removedTokenHashes = db.prepare('SELECT token_hash AS tokenHash FROM sessions WHERE user_id = ?').all(userId) as { tokenHash: string }[]
+    const affectedUsers = new Set((db.prepare(`SELECT user_id AS userId FROM conversation_members WHERE conversation_id IN
+      (SELECT conversation_id FROM conversation_members WHERE user_id = ?) AND user_id <> ?
+      UNION SELECT CASE WHEN requester_id = ? THEN addressee_id ELSE requester_id END AS userId FROM friendships
+      WHERE requester_id = ? OR addressee_id = ?`).all(userId, userId, userId, userId, userId) as { userId: string }[]).map(row => row.userId))
+
+    const eraseAccount = db.transaction(() => {
+      const ownedCommunities = db.prepare('SELECT id FROM communities WHERE owner_id = ?').all(userId) as { id: string }[]
+      for (const community of ownedCommunities) {
+        const nextOwner = db.prepare(`SELECT user_id AS userId FROM community_members WHERE community_id = ? AND user_id <> ?
+          ORDER BY joined_at, user_id LIMIT 1`).get(community.id, userId) as { userId: string } | undefined
+        if (!nextOwner) {
+          db.prepare('DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM community_channels WHERE community_id = ?)').run(community.id)
+          db.prepare('DELETE FROM communities WHERE id = ?').run(community.id)
+        }
+        else {
+          db.prepare('UPDATE communities SET owner_id = ? WHERE id = ?').run(nextOwner.userId, community.id)
+          db.prepare("UPDATE community_members SET role = 'owner' WHERE community_id = ? AND user_id = ?").run(community.id, nextOwner.userId)
+        }
+      }
+      db.prepare('DELETE FROM users WHERE id = ?').run(userId)
+      db.prepare('DELETE FROM conversations WHERE NOT EXISTS (SELECT 1 FROM conversation_members cm WHERE cm.conversation_id = conversations.id)').run()
+    })
+    eraseAccount()
+
+    const removedTokenSet = new Set(removedTokenHashes.map(session => session.tokenHash))
+    void io.in(`user:${userId}`).fetchSockets().then(sockets => {
+      for (const socket of sockets) if (removedTokenSet.has(socket.data.tokenHash)) socket.disconnect(true)
+    })
+    for (const affectedUser of affectedUsers) {
+      io.to(`user:${affectedUser}`).emit('communities:changed')
+      io.to(`user:${affectedUser}`).emit('conversations:changed')
+      io.to(`user:${affectedUser}`).emit('contacts:changed')
+    }
+    return res.status(204).end()
+  } catch (error) { return next(error) }
+})
+
 app.post('/api/auth/password', requireAuth, rateLimit({ windowMs: 60 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false }), async (req: AuthRequest, res, next) => {
   try {
     const currentPassword = String(req.body?.currentPassword ?? '')

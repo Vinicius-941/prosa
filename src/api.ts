@@ -66,6 +66,28 @@ export const api = {
     return result.user
   },
   me: () => request<{ user: ProsaUser }>('/me'),
+  async exportAccount() {
+    const headers = new Headers()
+    const token = sessionToken()
+    if (token) headers.set('authorization', `Bearer ${token}`)
+    const response = await fetch(`${apiBase()}/account/export`, { headers })
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({})) as { error?: string }
+      throw new Error(result.error ?? `Falha na solicitação (${response.status}).`)
+    }
+    const url = URL.createObjectURL(await response.blob())
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'prosa-account-export.json'
+    document.body.append(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  },
+  async deleteAccount(currentPassword: string, confirmation: string) {
+    await request<void>('/account', { method: 'DELETE', body: JSON.stringify({ currentPassword, confirmation }) })
+    localStorage.removeItem(tokenKey)
+  },
   changePassword: (currentPassword: string, newPassword: string) => request<void>('/auth/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) }),
   sessions: () => request<{ sessions: ApiSession[] }>('/sessions'),
   revokeSession: (id: string) => request<void>(`/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
