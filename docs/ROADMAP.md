@@ -4,7 +4,7 @@ A feature is marked implemented only when the behavior exists in the application
 
 | Area | Status | Evidence / remaining work |
 | --- | --- | --- |
-| Responsive conversation workspace | Implemented | React client with desktop and narrow-screen layouts |
+| Responsive conversation workspace | Implemented | React client with desktop and narrow-screen layouts; browser navigation drawer supports conversation and channel selection |
 | Account creation and sign-in | Implemented (local foundation) | API uses Argon2id password hashes; needs email verification, recovery, MFA, and security review |
 | Session creation and revocation | Implemented (early) | Random bearer value, digest stored in SQLite, 30-day expiry, per-device labels, last-use timestamps, active-session listing, remote revocation, password changes and automatic revocation of other sessions; email recovery, MFA, broader device security and CSRF/origin review remain |
 | Conversation listing | Implemented | Shows the personal space and accepted direct conversations |
@@ -20,15 +20,15 @@ A feature is marked implemented only when the behavior exists in the application
 | Communities and text channels | Implemented (early) | Invite-code entry and owner/admin invite rotation; owner, admin, and member roles; owner-managed admin promotion, community rename/deletion, member removal, participant exit, admin/member channel creation, and persisted channel messages; bans, timeouts, audit history, and granular channel permissions remain |
 | Attachments and media storage | Not implemented | Safe upload validation, limits, scanning policy, and object storage required |
 | Voice, video, and screen sharing | Implemented (early) | One-to-one WebRTC audio calls have authenticated live signaling, incoming/outgoing/decline/busy/end states, microphone permission, mute, and access-revocation cleanup. Uses a public STUN server; TURN, network/device validation, video, group calls, and screen sharing remain |
-| Desktop app shell | Implemented (early) | Electron starts the local API, binds it to loopback, and keeps account data in the user's application-data folder; verify packaged app launch and upgrades |
+| Desktop app shell | Implemented (early) | Electron starts the local API, binds it to loopback, and keeps account data in the user's application-data folder; packaged app launch and upgrades still need clean-machine checks |
 | Windows installers | Implemented (early) | NSIS installer build is wired into Windows CI and tagged releases; signing and clean-machine install/upgrade checks remain |
 | Linux packages | Implemented (early) | AppImage and Debian targets are wired into Linux tagged releases; clean-machine launch and upgrade checks remain |
-| Android client | Implemented (early) | Capacitor Android application with touch-sized bottom navigation, conversation picker, secure API endpoint setup, Android 8+ minimum, and CI debug APK build; requires a deployed HTTPS API, signed release APK/AAB, native secure session storage, notifications, and device validation |
+| Android client | Implemented (early) | Capacitor Android application with touch-sized navigation, conversation picker, API endpoint setup, Android 8+ minimum, and CI debug APK build; requires a deployed HTTPS API, signed release APK/AAB, native secure session storage, notifications, and physical-device validation |
 | Service operations foundation | Implemented (early) | Production origin validation, health endpoint checks SQLite, graceful process shutdown, Docker image, persistent Compose volume, Caddy HTTPS proxy, and CI container health check; operator-provided host, off-server backups/restore drills, monitoring, multi-instance design, and security review remain |
 | Security and privacy review | In progress | Baseline password hashing, password updates, per-device revocation, rate-limited auth endpoints, security headers, input limits, authenticated JSON export, and password-confirmed account erasure with community ownership transfer; comprehensive threat model, retention controls, independent review, and legal review remain |
 | Performance benchmarks | In progress | Reproducible local API write workload reports startup time, throughput and p50/p95/p99 latency, checks persisted history, and records a Windows run in `benchmarks/results/`; desktop idle memory, mobile battery, media and cross-product comparisons remain |
-| CI checks | Implemented | `.github/workflows/ci.yml` runs integration checks, lint, client/service builds, and unpacked desktop packaging on Windows and Linux |
-| Release artifacts | Implemented (early) | `.github/workflows/release.yml` packages Windows NSIS, Linux AppImage, and Debian assets for version tags; signing, checksums, provenance, and a first end-to-end release remain |
+| CI checks | Implemented (early) | `.github/workflows/ci.yml` runs integration checks, lint, client/service builds, and unpacked Windows/Linux desktop packaging; Chromium end-to-end UI and accessibility checks run on Ubuntu |
+| Release artifacts | Implemented (early) | `.github/workflows/release.yml` packages Windows NSIS, Linux AppImage, Debian assets, and an Android debug preview for version tags; signing, checksums, and provenance remain |
 
 ## Milestones
 

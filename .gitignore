@@ -12,6 +12,8 @@ dist
 dist-server
 artifacts
 desktop-artifacts
+test-results/
+playwright-report/
 dist-ssr
 *.local
 data/

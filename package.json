@@ -2,7 +2,7 @@
   "name": "prosa",
   "productName": "Prosa",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Um aplicativo de comunicação para conversas diretas e comunidades.",
   "author": {
     "name": "Prosa contributors",
@@ -15,6 +15,7 @@
     "api:dev": "tsx watch server/index.ts",
     "api:start": "tsx server/index.ts",
     "test": "tsx --test tests/social-flow.test.ts",
+    "test:e2e": "playwright test",
     "build": "tsc -b && vite build",
     "build:service": "esbuild server/index.ts --bundle --platform=node --format=cjs --target=node22 --external:argon2 --external:better-sqlite3 --external:dotenv --outfile=dist-server/index.cjs",
     "build:desktop": "npm run build -- --mode desktop && npm run build:service",
@@ -84,7 +85,9 @@
     "socket.io-client": "^4.8.4"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.13.0",
     "@capacitor/cli": "^8.4.3",
+    "@playwright/test": "^1.64.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",

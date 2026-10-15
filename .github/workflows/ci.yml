@@ -56,6 +56,10 @@ jobs:
       - run: npm run build
       - run: npm run build:service
       - if: matrix.os == 'ubuntu-latest'
+        run: npx playwright install --with-deps chromium
+      - if: matrix.os == 'ubuntu-latest'
+        run: npm run test:e2e
+      - if: matrix.os == 'ubuntu-latest'
         run: npm run benchmark:service -- --messages=100 --concurrency=5
       - run: npx electron-builder --dir --${{ matrix.package }} --publish never
 
