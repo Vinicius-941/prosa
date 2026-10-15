@@ -29,7 +29,7 @@ db.exec(`
   );
   CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'personal' CHECK (kind IN ('personal', 'direct')),
+    kind TEXT NOT NULL DEFAULT 'personal' CHECK (kind IN ('personal', 'direct', 'channel')),
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE TABLE IF NOT EXISTS conversation_members (
@@ -66,6 +66,48 @@ const conversationColumns = db.pragma('table_info(conversations)') as { name: st
 if (!conversationColumns.some(column => column.name === 'kind')) {
   db.exec("ALTER TABLE conversations ADD COLUMN kind TEXT NOT NULL DEFAULT 'personal'")
 }
+const conversationSchema = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversations'").get() as { sql: string } | undefined
+if (conversationSchema && !conversationSchema.sql.includes("'channel'")) {
+  db.pragma('foreign_keys = OFF')
+  try {
+    db.exec(`BEGIN IMMEDIATE;
+      CREATE TABLE conversations_next (
+        id TEXT PRIMARY KEY, title TEXT NOT NULL, color TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'personal' CHECK (kind IN ('personal', 'direct', 'channel')),
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO conversations_next (id, title, color, kind, created_at)
+        SELECT id, title, color, kind, created_at FROM conversations;
+      DROP TABLE conversations;
+      ALTER TABLE conversations_next RENAME TO conversations;
+      COMMIT;`)
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  } finally {
+    db.pragma('foreign_keys = ON')
+  }
+}
+db.exec(`
+  CREATE TABLE IF NOT EXISTS communities (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, invite_code TEXT NOT NULL UNIQUE,
+    owner_id TEXT NOT NULL REFERENCES users(id), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE TABLE IF NOT EXISTS community_members (
+    community_id TEXT NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),
+    joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (community_id, user_id)
+  );
+  CREATE TABLE IF NOT EXISTS community_channels (
+    id TEXT PRIMARY KEY, community_id TEXT NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+    conversation_id TEXT NOT NULL UNIQUE REFERENCES conversations(id) ON DELETE CASCADE,
+    name TEXT NOT NULL, position INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (community_id, name)
+  );
+  CREATE INDEX IF NOT EXISTS community_members_user ON community_members(user_id, joined_at);
+`)
 
 const app = express()
 app.disable('x-powered-by')
@@ -77,6 +119,7 @@ app.use('/api/auth', rateLimit({ windowMs: 15 * 60_000, limit: 30, standardHeade
 app.use('/api/users/search', rateLimit({ windowMs: 60_000, limit: 90, standardHeaders: 'draft-8', legacyHeaders: false }))
 app.use('/api/messages/search', rateLimit({ windowMs: 60_000, limit: 60, standardHeaders: 'draft-8', legacyHeaders: false }))
 app.use('/api/friend-requests', rateLimit({ windowMs: 60 * 60_000, limit: 40, standardHeaders: 'draft-8', legacyHeaders: false }))
+app.use('/api/communities/join', rateLimit({ windowMs: 60 * 60_000, limit: 20, standardHeaders: 'draft-8', legacyHeaders: false }))
 
 const createSession = db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (?, ?, ?)')
 const sessionUser = db.prepare(`SELECT users.id, users.username, users.display_name AS displayName
@@ -131,6 +174,9 @@ function canAccessConversation(conversationId: string, userId: string) {
   const conversation = db.prepare(`SELECT c.kind FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
     WHERE c.id = ? AND cm.user_id = ?`).get(conversationId, userId) as { kind: string } | undefined
   if (!conversation) return false
+  if (conversation.kind === 'channel') return Boolean(db.prepare(`SELECT 1 FROM community_channels cc
+    JOIN community_members cm ON cm.community_id = cc.community_id
+    WHERE cc.conversation_id = ? AND cm.user_id = ? LIMIT 1`).get(conversationId, userId))
   if (conversation.kind !== 'direct') return true
   return Boolean(db.prepare(`SELECT 1 FROM conversation_members peer JOIN friendships f ON f.status = 'accepted'
     AND ((f.requester_id = ? AND f.addressee_id = peer.user_id) OR (f.requester_id = peer.user_id AND f.addressee_id = ?))
@@ -181,6 +227,93 @@ app.post('/api/auth/logout', requireAuth, (req: AuthRequest, res) => {
 
 app.get('/api/me', requireAuth, (req: AuthRequest, res) => res.json({ user: req.user }))
 
+app.get('/api/communities', requireAuth, (req: AuthRequest, res) => {
+  const rows = db.prepare(`SELECT c.id, c.name, c.invite_code AS inviteCode, cm.role,
+    (SELECT COUNT(*) FROM community_members countMembers WHERE countMembers.community_id = c.id) AS memberCount
+    FROM communities c JOIN community_members cm ON cm.community_id = c.id
+    WHERE cm.user_id = ? ORDER BY c.name COLLATE NOCASE`).all(req.user!.id) as { id: string; name: string; inviteCode: string; role: string; memberCount: number }[]
+  const channelQuery = db.prepare(`SELECT id, conversation_id AS conversationId, name, position
+    FROM community_channels WHERE community_id = ? ORDER BY position, name COLLATE NOCASE`)
+  const communities = rows.map(({ inviteCode, ...community }) => ({
+    ...community,
+    inviteCode: community.role === 'owner' || community.role === 'admin' ? inviteCode : null,
+    channels: channelQuery.all(community.id),
+  }))
+  return res.json({ communities })
+})
+
+app.post('/api/communities', requireAuth, rateLimit({ windowMs: 60 * 60_000, limit: 10, standardHeaders: 'draft-8', legacyHeaders: false }), (req: AuthRequest, res) => {
+  const name = String(req.body?.name ?? '').trim()
+  if (name.length < 2 || name.length > 48) return res.status(400).json({ error: 'O nome da comunidade deve ter entre 2 e 48 caracteres.' })
+  const id = randomBytes(16).toString('hex')
+  const channelId = randomBytes(16).toString('hex')
+  const conversationId = randomBytes(16).toString('hex')
+  const inviteCode = randomBytes(9).toString('base64url')
+  const create = db.transaction(() => {
+    db.prepare('INSERT INTO communities (id, name, invite_code, owner_id) VALUES (?, ?, ?, ?)').run(id, name, inviteCode, req.user!.id)
+    db.prepare("INSERT INTO community_members (community_id, user_id, role) VALUES (?, ?, 'owner')").run(id, req.user!.id)
+    db.prepare("INSERT INTO conversations (id, title, color, kind) VALUES (?, 'geral', 'violet', 'channel')").run(conversationId)
+    db.prepare('INSERT INTO community_channels (id, community_id, conversation_id, name, position) VALUES (?, ?, ?, ?, 0)')
+      .run(channelId, id, conversationId, 'geral')
+    db.prepare('INSERT INTO conversation_members (conversation_id, user_id) VALUES (?, ?)').run(conversationId, req.user!.id)
+  })
+  create()
+  io.to(`user:${req.user!.id}`).emit('conversations:changed')
+  io.to(`user:${req.user!.id}`).emit('communities:changed')
+  return res.status(201).json({ community: { id, name, role: 'owner', inviteCode, channels: [{ id: channelId, conversationId, name: 'geral' }] } })
+})
+
+app.post('/api/communities/join', requireAuth, (req: AuthRequest, res) => {
+  const inviteCode = String(req.body?.inviteCode ?? '').trim()
+  if (!/^[A-Za-z0-9_-]{10,32}$/.test(inviteCode)) return res.status(400).json({ error: 'Código de convite inválido.' })
+  const community = db.prepare('SELECT id FROM communities WHERE invite_code = ?').get(inviteCode) as { id: string } | undefined
+  if (!community) return res.status(404).json({ error: 'Não encontramos essa comunidade.' })
+  const existing = db.prepare('SELECT 1 FROM community_members WHERE community_id = ? AND user_id = ?').get(community.id, req.user!.id)
+  if (existing) return res.status(409).json({ error: 'Você já participa desta comunidade.' })
+  const join = db.transaction(() => {
+    db.prepare("INSERT INTO community_members (community_id, user_id, role) VALUES (?, ?, 'member')").run(community.id, req.user!.id)
+    db.prepare(`INSERT INTO conversation_members (conversation_id, user_id)
+      SELECT conversation_id, ? FROM community_channels WHERE community_id = ?`).run(req.user!.id, community.id)
+  })
+  join()
+  const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(community.id) as { userId: string }[]
+  for (const member of members) {
+    io.to(`user:${member.userId}`).emit('communities:changed')
+    io.to(`user:${member.userId}`).emit('conversations:changed')
+  }
+  return res.status(200).json({ communityId: community.id })
+})
+
+app.post('/api/communities/:id/channels', requireAuth, (req: AuthRequest, res) => {
+  const name = String(req.body?.name ?? '').trim()
+  if (!/^[\p{L}\p{N}][\p{L}\p{N}-]{1,31}$/u.test(name)) return res.status(400).json({ error: 'Use de 2 a 32 letras, números ou hífens no nome do canal.' })
+  const membership = db.prepare('SELECT role FROM community_members WHERE community_id = ? AND user_id = ?')
+    .get(req.params.id, req.user!.id) as { role: string } | undefined
+  if (!membership) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  if (membership.role !== 'owner' && membership.role !== 'admin') return res.status(403).json({ error: 'Somente responsáveis podem criar canais.' })
+  const channelId = randomBytes(16).toString('hex')
+  const conversationId = randomBytes(16).toString('hex')
+  try {
+    const create = db.transaction(() => {
+      db.prepare('INSERT INTO conversations (id, title, color, kind) VALUES (?, ?, ?, ?)').run(conversationId, name, 'violet', 'channel')
+      db.prepare('INSERT INTO community_channels (id, community_id, conversation_id, name, position) VALUES (?, ?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM community_channels WHERE community_id = ?))')
+        .run(channelId, req.params.id, conversationId, name, req.params.id)
+      db.prepare(`INSERT INTO conversation_members (conversation_id, user_id)
+        SELECT ?, user_id FROM community_members WHERE community_id = ?`).run(conversationId, req.params.id)
+    })
+    create()
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('UNIQUE constraint failed')) return res.status(409).json({ error: 'Já existe um canal com esse nome.' })
+    throw error
+  }
+  const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(req.params.id) as { userId: string }[]
+  for (const member of members) {
+    io.to(`user:${member.userId}`).emit('communities:changed')
+    io.to(`user:${member.userId}`).emit('conversations:changed')
+  }
+  return res.status(201).json({ channel: { id: channelId, conversationId, name } })
+})
+
 app.get('/api/users/search', requireAuth, (req: AuthRequest, res) => {
   const query = String(req.query.q ?? '').trim().replace(/^@/, '').toLowerCase()
   if (query.length < 2) return res.json({ users: [] })
@@ -205,16 +338,20 @@ app.get('/api/messages/search', requireAuth, (req: AuthRequest, res) => {
     u.display_name AS author, m.body AS text, m.created_at AS createdAt,
     CASE WHEN c.kind = 'direct' THEN (SELECT peer.display_name FROM conversation_members other
       JOIN users peer ON peer.id = other.user_id WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1)
+      WHEN c.kind = 'channel' THEN (SELECT community.name || ' · #' || cc.name FROM community_channels cc
+        JOIN communities community ON community.id = cc.community_id WHERE cc.conversation_id = c.id LIMIT 1)
       ELSE c.title END AS conversationName
     FROM messages m JOIN conversations c ON c.id = m.conversation_id
     JOIN conversation_members cm ON cm.conversation_id = c.id AND cm.user_id = @me
     JOIN users u ON u.id = m.author_id
     WHERE m.body LIKE @pattern ESCAPE '!'
-      AND (c.kind <> 'direct' OR EXISTS (
+      AND ((c.kind = 'channel' AND EXISTS (SELECT 1 FROM community_channels cc JOIN community_members cm
+        ON cm.community_id = cc.community_id WHERE cc.conversation_id = c.id AND cm.user_id = @me))
+        OR (c.kind <> 'channel' AND (c.kind <> 'direct' OR EXISTS (
         SELECT 1 FROM conversation_members peer JOIN friendships f ON f.status = 'accepted'
         AND ((f.requester_id = @me AND f.addressee_id = peer.user_id) OR (f.requester_id = peer.user_id AND f.addressee_id = @me))
         WHERE peer.conversation_id = c.id AND peer.user_id <> @me
-      ))
+      ))))
     ORDER BY m.created_at DESC, m.rowid DESC LIMIT 40`).all({ me: req.user!.id, pattern })
   return res.json({ messages })
 })
@@ -302,14 +439,17 @@ app.get('/api/conversations', requireAuth, (req: AuthRequest, res) => {
     CASE WHEN c.kind = 'direct' THEN (SELECT u.display_name FROM conversation_members other JOIN users u ON u.id = other.user_id
       WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) ELSE c.title END AS name,
     c.color, c.created_at AS createdAt,
-    (SELECT u.username FROM conversation_members other JOIN users u ON u.id = other.user_id
-      WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) AS peerUsername,
+    CASE WHEN c.kind = 'direct' THEN (SELECT u.username FROM conversation_members other JOIN users u ON u.id = other.user_id
+      WHERE other.conversation_id = c.id AND other.user_id <> @me LIMIT 1) END AS peerUsername,
+    community.id AS communityId, community.name AS communityName, cc.name AS channelName,
     (SELECT m.body FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS preview,
     (SELECT m.created_at FROM messages m WHERE m.conversation_id = c.id ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1) AS lastMessageAt
     ,(SELECT COUNT(*) FROM messages unread WHERE unread.conversation_id = c.id AND unread.author_id <> @me
       AND unread.rowid > COALESCE((SELECT cr.last_read_rowid FROM conversation_reads cr
         WHERE cr.conversation_id = c.id AND cr.user_id = @me), 0)) AS unreadCount
     FROM conversations c JOIN conversation_members cm ON cm.conversation_id = c.id
+    LEFT JOIN community_channels cc ON cc.conversation_id = c.id
+    LEFT JOIN communities community ON community.id = cc.community_id
     WHERE cm.user_id = @me AND (c.kind <> 'direct' OR EXISTS (
       SELECT 1 FROM conversation_members peer JOIN friendships f ON f.status = 'accepted'
       AND ((f.requester_id = @me AND f.addressee_id = peer.user_id) OR (f.requester_id = peer.user_id AND f.addressee_id = @me))

@@ -24,13 +24,17 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   const base = `${origin}/api`
   const tag = Math.random().toString(36).slice(2, 10)
 
-  async function request<T>(route: string, token?: string, init: RequestInit = {}): Promise<T> {
-    const response = await fetch(`${base}${route}`, {
+  async function sendHttp(route: string, token?: string, init: RequestInit = {}) {
+    return fetch(`${base}${route}`, {
       ...init,
       headers: { ...(init.body ? { 'content-type': 'application/json' } : {}), ...(token ? { authorization: `Bearer ${token}` } : {}), ...init.headers },
     })
-    if (!response.ok) throw new Error(`${response.status}: ${await response.text()}`)
-    return response.status === 204 ? undefined as T : response.json() as Promise<T>
+  }
+
+  async function request<T>(route: string, token?: string, init: RequestInit = {}): Promise<T> {
+    const result = await sendHttp(route, token, init)
+    if (!result.ok) throw new Error(`${result.status}: ${await result.text()}`)
+    return result.status === 204 ? undefined as T : result.json() as Promise<T>
   }
 
   async function register(prefix: string, displayName: string): Promise<Account> {
@@ -58,6 +62,36 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     method: 'POST', body: JSON.stringify({ username: alice.user.username }),
   })
   assert.equal(accepted.status, 'accepted')
+
+  const newCommunity = await request<{ community: { id: string; inviteCode: string; channels: { id: string; conversationId: string; name: string }[] } }>('/communities', alice.token, {
+    method: 'POST', body: JSON.stringify({ name: 'Núcleo Prosa' }),
+  })
+  const generalChannel = newCommunity.community.channels[0]
+  assert.equal(generalChannel.name, 'geral')
+  assert.equal((await request<{ communities: { id: string }[] }>('/communities', bruno.token)).communities.length, 0)
+  const joinedCommunity = await request<{ communityId: string }>('/communities/join', bruno.token, {
+    method: 'POST', body: JSON.stringify({ inviteCode: newCommunity.community.inviteCode }),
+  })
+  assert.equal(joinedCommunity.communityId, newCommunity.community.id)
+  const brunoCommunity = await request<{ communities: { id: string; role: string; inviteCode: string | null; channels: { conversationId: string }[] }[] }>('/communities', bruno.token)
+  assert.equal(brunoCommunity.communities[0].role, 'member')
+  assert.equal(brunoCommunity.communities[0].inviteCode, null)
+  assert.equal(brunoCommunity.communities[0].channels[0].conversationId, generalChannel.conversationId)
+  const extraChannel = await request<{ channel: { conversationId: string; name: string } }>(`/communities/${newCommunity.community.id}/channels`, alice.token, {
+    method: 'POST', body: JSON.stringify({ name: 'ideias' }),
+  })
+  assert.equal(extraChannel.channel.name, 'ideias')
+  const memberCreateChannel = await sendHttp(`/communities/${newCommunity.community.id}/channels`, bruno.token, {
+    method: 'POST', body: JSON.stringify({ name: 'restrito' }),
+  })
+  assert.equal(memberCreateChannel.status, 403)
+  const outsiderHistory = await sendHttp(`/conversations/${generalChannel.conversationId}/messages`, carla.token)
+  assert.equal(outsiderHistory.status, 404)
+  await request(`/conversations/${generalChannel.conversationId}/messages`, alice.token, {
+    method: 'POST', body: JSON.stringify({ text: 'Mensagem da comunidade' }),
+  })
+  const communityHistory = await request<{ messages: { text: string }[] }>(`/conversations/${generalChannel.conversationId}/messages`, bruno.token)
+  assert.equal(communityHistory.messages[0].text, 'Mensagem da comunidade')
 
   const aliceConversations = await request<{ conversations: { id: string }[] }>('/conversations', alice.token)
   const brunoConversations = await request<{ conversations: { id: string; unreadCount: number }[] }>('/conversations', bruno.token)
@@ -99,6 +133,8 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     })
     const joined = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', accepted.conversationId, resolve))
     assert.equal(joined.ok, true)
+    const joinedChannel = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
+    assert.equal(joinedChannel.ok, true)
 
     const nextLiveMessage = new Promise<{ text: string }>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Timed out waiting for a live message')), 3000)
@@ -128,6 +164,8 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(revokedJoin.ok, false)
     const removedFriends = await request<{ friends: { id: string }[] }>('/friends', alice.token)
     assert.equal(removedFriends.friends.length, 0)
+    const channelAfterUnfriend = await request<{ messages: { text: string }[] }>(`/conversations/${generalChannel.conversationId}/messages`, bruno.token)
+    assert.equal(channelAfterUnfriend.messages[0].text, 'Mensagem da comunidade')
     const revokedSearch = await request<{ messages: { id: string }[] }>('/messages/search?q=Hist%C3%B3rico%2023', bruno.token)
     assert.equal(revokedSearch.messages.length, 0)
     const removedConversations = await request<{ conversations: { id: string }[] }>('/conversations', bruno.token)

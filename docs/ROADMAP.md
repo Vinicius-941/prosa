@@ -15,7 +15,7 @@ A feature is marked implemented only when the behavior exists in the application
 | Real-time message delivery | Implemented (early) | Authenticated Socket.IO session and conversation membership; reconnect supported; offline messages remain available in paginated history |
 | Per-user read states | Implemented (early) | Read position is persisted per account; conversation list provides unread counts |
 | Conversation search | Implemented (early) | Authenticated, rate-limited message search covers only conversations the account can still access; selecting a match opens its message context |
-| Communities, channels, roles, moderation | Not implemented | Data model and server-side authorization required |
+| Communities and text channels | Implemented (early) | Invite-code entry, owner/member access, owner-only channel creation, persisted channel messages; admin controls, leaving communities, moderation, and broader role management remain |
 | Attachments and media storage | Not implemented | Safe upload validation, limits, scanning policy, and object storage required |
 | Voice, video, and screen sharing | Not implemented | Evaluate WebRTC/SFU architecture and platform support |
 | Desktop app shell | Implemented (early) | Electron starts the local API, binds it to loopback, and keeps account data in the user's application-data folder; verify packaged app launch and upgrades |

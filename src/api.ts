@@ -1,7 +1,9 @@
 export type ProsaUser = { id: string; username: string; displayName: string }
-export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null; peerUsername: string | null; unreadCount: number }
+export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null; peerUsername: string | null; unreadCount: number; communityId: string | null; communityName: string | null; channelName: string | null }
 export type ApiMessage = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string }
 export type ApiMessageSearchResult = ApiMessage & { conversationName: string }
+export type ApiCommunityChannel = { id: string; conversationId: string; name: string; position?: number }
+export type ApiCommunity = { id: string; name: string; inviteCode: string | null; role: 'owner' | 'admin' | 'member'; memberCount: number; channels: ApiCommunityChannel[] }
 export type ApiMessagePage = { messages: ApiMessage[]; nextCursor: string | null }
 export type ApiPerson = { id: string; userId?: string; username: string; displayName: string; relationship?: 'none' | 'incoming' | 'outgoing' | 'friend' }
 export type ApiFriendData = { friends: ApiPerson[]; incoming: ApiPerson[]; outgoing: ApiPerson[] }
@@ -40,6 +42,10 @@ export const api = {
   me: () => request<{ user: ProsaUser }>('/me'),
   logout: async () => { try { await request('/auth/logout', { method: 'POST' }) } finally { localStorage.removeItem(tokenKey) } },
   conversations: () => request<{ conversations: ApiConversation[] }>('/conversations'),
+  communities: () => request<{ communities: ApiCommunity[] }>('/communities'),
+  createCommunity: (name: string) => request<{ community: ApiCommunity }>('/communities', { method: 'POST', body: JSON.stringify({ name }) }),
+  joinCommunity: (inviteCode: string) => request<{ communityId: string }>('/communities/join', { method: 'POST', body: JSON.stringify({ inviteCode }) }),
+  createCommunityChannel: (communityId: string, name: string) => request<{ channel: ApiCommunityChannel }>(`/communities/${encodeURIComponent(communityId)}/channels`, { method: 'POST', body: JSON.stringify({ name }) }),
   messages: (id: string, before?: string | null) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages${before ? `?before=${encodeURIComponent(before)}` : ''}`),
   messageContext: (id: string, messageId: string) => request<ApiMessagePage>(`/conversations/${encodeURIComponent(id)}/messages?around=${encodeURIComponent(messageId)}`),
   searchMessages: (query: string) => request<{ messages: ApiMessageSearchResult[] }>(`/messages/search?q=${encodeURIComponent(query)}`),
