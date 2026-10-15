@@ -10,6 +10,10 @@ This is an early development foundation. Email verification, account recovery, m
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed feature matrix and remaining work.
 
+## Android preview
+
+The Android client is an installable Capacitor application that uses the same Prosa client and connects to an independently hosted Prosa API. On first launch, enter the API's HTTPS base address. Configure that service's `CLIENT_ORIGIN` to allow `https://localhost`, the Android WebView origin. Android source is in `android/`; build the web assets and sync them with `npm run android:sync`, then run the Gradle `assembleDebug` task from that directory. The CI workflow builds a debug APK for each change. A public production API, signed release APK/AAB, push notifications, and device-level session credential storage are not yet configured.
+
 ## Requirements
 
 - Node.js 22.12 or later

@@ -1,3 +1,5 @@
+import { Capacitor } from '@capacitor/core'
+
 export type ProsaUser = { id: string; username: string; displayName: string }
 export type ApiConversation = { id: string; name: string; color: string; preview: string | null; lastMessageAt: string | null; peerUsername: string | null; unreadCount: number; communityId: string | null; communityName: string | null; channelName: string | null }
 export type ApiMessage = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null }
@@ -11,7 +13,16 @@ export type ApiFriendData = { friends: ApiPerson[]; incoming: ApiPerson[]; outgo
 type AuthResult = { token: string; user: ProsaUser }
 
 const tokenKey = 'prosa.session'
-const base = window.prosaDesktop?.apiUrl ?? import.meta.env.VITE_API_URL ?? '/api'
+const apiServerKey = 'prosa.server'
+
+function apiBase() {
+  return (window.prosaDesktop?.apiUrl ?? import.meta.env.VITE_API_URL ?? localStorage.getItem(apiServerKey) ?? '/api').replace(/\/+$/, '')
+}
+
+function socketOrigin() {
+  const base = apiBase()
+  return base.startsWith('http') ? base.replace(/\/api\/?$/, '') : undefined
+}
 
 function sessionToken() { return localStorage.getItem(tokenKey) }
 
@@ -20,7 +31,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   if (options.body) headers.set('content-type', 'application/json')
   const token = sessionToken()
   if (token) headers.set('authorization', `Bearer ${token}`)
-  const response = await fetch(`${base}${path}`, { ...options, headers })
+  const response = await fetch(`${apiBase()}${path}`, { ...options, headers })
   if (!response.ok) {
     const result = await response.json().catch(() => ({})) as { error?: string }
     throw new Error(result.error ?? `Falha na solicitação (${response.status}).`)
@@ -30,6 +41,20 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  isAndroid: () => Capacitor.getPlatform() === 'android',
+  serverUrl: () => localStorage.getItem(apiServerKey) ?? '',
+  hasServer: () => Boolean(window.prosaDesktop?.apiUrl ?? import.meta.env.VITE_API_URL ?? localStorage.getItem(apiServerKey)),
+  saveServerUrl(value: string) {
+    let parsed: URL
+    try { parsed = new URL(value.trim()) } catch { throw new Error('Informe um endereço completo do serviço.') }
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error('Informe apenas o endereço base do serviço, sem credenciais ou parâmetros.')
+    if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') throw new Error('O endereço do serviço precisa usar uma conexão segura (HTTPS).')
+    const root = parsed.toString().replace(/\/$/, '').replace(/\/api$/, '')
+    const endpoint = `${root}/api`
+    localStorage.setItem(apiServerKey, endpoint)
+    return endpoint
+  },
+  socketOrigin,
   async register(username: string, displayName: string, password: string) {
     const result = await request<AuthResult>('/auth/register', { method: 'POST', body: JSON.stringify({ username, displayName, password }) })
     localStorage.setItem(tokenKey, result.token)

@@ -21,7 +21,7 @@ A feature is marked implemented only when the behavior exists in the application
 | Desktop app shell | Implemented (early) | Electron starts the local API, binds it to loopback, and keeps account data in the user's application-data folder; verify packaged app launch and upgrades |
 | Windows installers | Implemented (early) | NSIS installer build is wired into Windows CI and tagged releases; signing and clean-machine install/upgrade checks remain |
 | Linux packages | Implemented (early) | AppImage and Debian targets are wired into Linux tagged releases; clean-machine launch and upgrade checks remain |
-| Android client | Not implemented | Design and implement an adapted mobile experience |
+| Android client | Implemented (early) | Capacitor Android application with touch-sized bottom navigation, conversation picker, secure API endpoint setup, Android 8+ minimum, and CI debug APK build; requires a deployed HTTPS API, signed release APK/AAB, native secure session storage, notifications, and device validation |
 | Service operations foundation | Implemented (early) | Production origin validation, health endpoint checks SQLite, graceful process shutdown, persistent-directory example and production start script; deployment, TLS, backups, multi-instance design, monitoring and security review remain |
 | Security and privacy review | In progress | Baseline password hashing, password updates, per-device revocation, rate-limited auth endpoints, security headers, input limits; comprehensive threat model, transport deployment, data controls and independent review remain |
 | Performance benchmarks | Not implemented | Define reproducible workloads and measure actual desktop, server, and mobile builds |

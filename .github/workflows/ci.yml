@@ -10,6 +10,29 @@ permissions:
   contents: read
 
 jobs:
+  android:
+    name: Android · APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v5
+      - run: npm ci
+      - run: npm run android:sync
+      - run: ./gradlew assembleDebug
+        working-directory: android
+      - uses: actions/upload-artifact@v6
+        with:
+          name: prosa-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
   client-and-api:
     name: ${{ matrix.os }} · Node.js 22
     strategy:
