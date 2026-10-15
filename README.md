@@ -23,7 +23,7 @@ The Android client is an installable Capacitor application that uses the same Pr
 
 Build and open the desktop app with `npm run desktop:dev`. The desktop shell starts the API on a random local port, binds it to this device, and stores SQLite data in the operating system's Prosa application-data folder. This is a single-device local account store. Browser development continues to use `npm run dev` and `data/`.
 
-Create an unpacked desktop build for the current system with `npm run package:desktop`. GitHub Actions checks the Windows and Linux packages on every update. A version tag (`v*`) builds the Windows installer, Linux AppImage, and Debian package and attaches them to a GitHub release. Release installers are currently unsigned and may show an operating-system publisher warning.
+Create an unpacked desktop build for the current system with `npm run package:desktop`. GitHub Actions checks the Windows and Linux packages on every update. A version tag (`v*`) builds the Windows installer, Linux AppImage and Debian package, and an Android debug preview APK, then attaches them to a GitHub release. The Android APK is unsigned and intended only for preview; release installers are also unsigned and may show an operating-system publisher warning.
 
 ## Run locally
 

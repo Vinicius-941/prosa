@@ -35,6 +35,33 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  android:
+    name: Android preview APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v5
+      - run: npm ci
+      - run: npm run android:sync
+      - run: ./gradlew assembleDebug
+        working-directory: android
+      - name: Name preview package
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk "Prosa-Android-${GITHUB_REF_NAME}-debug-preview.apk"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: prosa-android
+          path: Prosa-Android-*-debug-preview.apk
+          if-no-files-found: error
+          retention-days: 7
+
   publish:
     needs: package
     runs-on: ubuntu-latest

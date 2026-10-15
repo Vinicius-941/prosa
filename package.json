@@ -4,7 +4,10 @@
   "private": true,
   "version": "0.1.0",
   "description": "Um aplicativo de comunicação para conversas diretas e comunidades.",
-  "author": "Prosa contributors",
+  "author": {
+    "name": "Prosa contributors",
+    "email": "87833023+Vinicius-941@users.noreply.github.com"
+  },
   "type": "module",
   "main": "desktop/main.cjs",
   "scripts": {
@@ -54,6 +57,7 @@
     },
     "linux": {
       "category": "Network;InstantMessaging",
+      "maintainer": "Prosa contributors <87833023+Vinicius-941@users.noreply.github.com>",
       "target": [
         "AppImage",
         "deb"
