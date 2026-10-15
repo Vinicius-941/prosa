@@ -1,0 +1,35 @@
+{
+  "benchmark": "prosa-service-message-write",
+  "measuredAt": "2026-10-15T02:43:22.388Z",
+  "runtime": {
+    "node": "v24.18.0",
+    "platform": "win32",
+    "arch": "x64",
+    "osRelease": "10.0.19045"
+  },
+  "host": {
+    "cpu": "AMD Ryzen 5 7600 6-Core Processor              ",
+    "logicalCpus": 12,
+    "totalMemoryBytes": 33412775936
+  },
+  "workload": {
+    "messages": 300,
+    "concurrency": 10,
+    "warmupMessages": 20,
+    "database": "SQLite temporário",
+    "transport": "HTTP local sem TLS"
+  },
+  "result": {
+    "serviceStartupMs": 132.47,
+    "elapsedMs": 179.41,
+    "writesPerSecond": 1672.11,
+    "latencyMs": {
+      "p50": 5.25,
+      "p95": 13.11,
+      "p99": 14.31,
+      "max": 15.73
+    },
+    "persistedMessages": 320
+  },
+  "scope": "Uma execução local de escrita concorrente; não é uma comparação entre serviços, não inclui clientes gráficos, mídia, TLS ou rede externa."
+}

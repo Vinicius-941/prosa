@@ -20,6 +20,7 @@
     "package:desktop": "npm run build:desktop && electron-builder --dir",
     "lint": "oxlint",
     "preview": "vite preview",
+    "benchmark:service": "npm run build:service && node benchmarks/service.mjs",
     "api:start:prod": "node dist-server/index.cjs"
   },
   "build": {

@@ -44,6 +44,8 @@ A production start command is available with `npm run api:start:prod` after `npm
 
 Run the account, connection-request, access-control, message-persistence, and live-delivery integration check with `npm test`.
 
+Run a reproducible local API write benchmark with `npm run benchmark:service -- --messages=300 --concurrency=10`. Methodology and measurement limits are described in [benchmarks/README.md](benchmarks/README.md); each run prints its actual measurements as JSON.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
