@@ -100,6 +100,7 @@ export const api = {
   communities: () => request<{ communities: ApiCommunity[] }>('/communities'),
   createCommunity: (name: string) => request<{ community: ApiCommunity }>('/communities', { method: 'POST', body: JSON.stringify({ name }) }),
   joinCommunity: (inviteCode: string) => request<{ communityId: string }>('/communities/join', { method: 'POST', body: JSON.stringify({ inviteCode }) }),
+  rotateCommunityInvite: (communityId: string) => request<{ communityId: string; inviteCode: string }>(`/communities/${encodeURIComponent(communityId)}/invite/rotate`, { method: 'POST' }),
   createCommunityChannel: (communityId: string, name: string) => request<{ channel: ApiCommunityChannel }>(`/communities/${encodeURIComponent(communityId)}/channels`, { method: 'POST', body: JSON.stringify({ name }) }),
   communityMembers: (communityId: string) => request<{ members: ApiCommunityMember[] }>(`/communities/${encodeURIComponent(communityId)}/members`),
   setCommunityMemberRole: (communityId: string, userId: string, role: 'admin' | 'member') => request<{ communityId: string; userId: string; role: string }>(`/communities/${encodeURIComponent(communityId)}/members/${encodeURIComponent(userId)}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),

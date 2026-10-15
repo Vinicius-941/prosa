@@ -483,6 +483,18 @@ app.post('/api/communities/join', requireAuth, (req: AuthRequest, res) => {
   return res.status(200).json({ communityId: community.id })
 })
 
+app.post('/api/communities/:id/invite/rotate', requireAuth, (req: AuthRequest, res) => {
+  const membership = db.prepare('SELECT role FROM community_members WHERE community_id = ? AND user_id = ?')
+    .get(req.params.id, req.user!.id) as { role: string } | undefined
+  if (!membership) return res.status(404).json({ error: 'Comunidade não encontrada.' })
+  if (membership.role !== 'owner' && membership.role !== 'admin') return res.status(403).json({ error: 'Somente responsáveis podem renovar o convite.' })
+  const inviteCode = randomBytes(9).toString('base64url')
+  db.prepare('UPDATE communities SET invite_code = ? WHERE id = ?').run(inviteCode, req.params.id)
+  const members = db.prepare('SELECT user_id AS userId FROM community_members WHERE community_id = ?').all(req.params.id) as { userId: string }[]
+  for (const member of members) io.to(`user:${member.userId}`).emit('communities:changed')
+  return res.json({ communityId: req.params.id, inviteCode })
+})
+
 app.post('/api/communities/:id/channels', requireAuth, (req: AuthRequest, res) => {
   const name = String(req.body?.name ?? '').trim()
   if (!/^[\p{L}\p{N}][\p{L}\p{N}-]{1,31}$/u.test(name)) return res.status(400).json({ error: 'Use de 2 a 32 letras, números ou hífens no nome do canal.' })

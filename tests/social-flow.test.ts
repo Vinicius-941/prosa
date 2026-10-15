@@ -68,6 +68,7 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   const alice = await register('alice', 'Alice Aurora')
   const bruno = await register('bruno', 'Bruno Bairro')
   const carla = await register('carla', 'Carla Costa')
+  const charlie = await register('charlie', 'Charlie Costa')
   const aliceSecondSession = await request<Account>('/auth/login', undefined, {
     method: 'POST', headers: { 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64) AppleWebKit Chrome/130.0' },
     body: JSON.stringify({ username: alice.user.username, password: 'SenhaDeIntegracao!2026' }),
@@ -140,6 +141,14 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   assert.equal(outsiderMembers.status, 404)
   const members = await request<{ members: { id: string; role: string }[] }>(`/communities/${newCommunity.community.id}/members`, alice.token)
   assert.deepEqual(members.members.map(member => member.role), ['owner', 'member'])
+  const unauthorizedInviteRotation = await sendHttp(`/communities/${newCommunity.community.id}/invite/rotate`, bruno.token, { method: 'POST' })
+  assert.equal(unauthorizedInviteRotation.status, 403)
+  const rotatedInvite = await request<{ inviteCode: string }>(`/communities/${newCommunity.community.id}/invite/rotate`, alice.token, { method: 'POST' })
+  assert.notEqual(rotatedInvite.inviteCode, newCommunity.community.inviteCode)
+  const oldInviteJoin = await sendHttp('/communities/join', charlie.token, { method: 'POST', body: JSON.stringify({ inviteCode: newCommunity.community.inviteCode }) })
+  assert.equal(oldInviteJoin.status, 404)
+  const currentInviteJoin = await request<{ communityId: string }>('/communities/join', charlie.token, { method: 'POST', body: JSON.stringify({ inviteCode: rotatedInvite.inviteCode }) })
+  assert.equal(currentInviteJoin.communityId, newCommunity.community.id)
   const memberPromote = await sendHttp(`/communities/${newCommunity.community.id}/members/${bruno.user.id}/role`, bruno.token, { method: 'PUT', body: JSON.stringify({ role: 'admin' }) })
   assert.equal(memberPromote.status, 403)
   await request(`/communities/${newCommunity.community.id}/members/${bruno.user.id}/role`, alice.token, { method: 'PUT', body: JSON.stringify({ role: 'admin' }) })
@@ -175,9 +184,7 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
   assert.equal((await sendHttp(`/conversations/${generalChannel.conversationId}/messages`, bruno.token)).status, 404)
   const brunoCommunityAfterRemoval = await request<{ communities: unknown[] }>('/communities', bruno.token)
   assert.equal(brunoCommunityAfterRemoval.communities.length, 0)
-  await request<{ communityId: string }>('/communities/join', bruno.token, { method: 'POST', body: JSON.stringify({ inviteCode: newCommunity.community.inviteCode }) })
-  const charlie = await register('charlie', 'Charlie Costa')
-  await request<{ communityId: string }>('/communities/join', charlie.token, { method: 'POST', body: JSON.stringify({ inviteCode: newCommunity.community.inviteCode }) })
+  await request<{ communityId: string }>('/communities/join', bruno.token, { method: 'POST', body: JSON.stringify({ inviteCode: rotatedInvite.inviteCode }) })
   const memberLeave = await request<void>(`/communities/${newCommunity.community.id}/members/${charlie.user.id}`, charlie.token, { method: 'DELETE' })
   assert.equal(memberLeave, undefined)
   const outsiderDelete = await sendHttp(`/communities/${newCommunity.community.id}`, carla.token, { method: 'DELETE' })

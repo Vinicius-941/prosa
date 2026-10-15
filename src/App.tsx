@@ -369,6 +369,15 @@ function App() {
     catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível remover o participante.') }
   }
 
+  async function rotateSelectedInvite() {
+    if (!selectedCommunity) return
+    try {
+      await api.rotateCommunityInvite(selectedCommunity.id)
+      await refreshCommunities()
+      setNotice('Código de convite renovado. O anterior não funciona mais.')
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Não foi possível renovar o convite.') }
+  }
+
   async function sendFriendRequest(person: ApiPerson) {
     try {
       const result = await api.requestFriend(person.username)
@@ -522,7 +531,7 @@ function App() {
       <section className="people-section"><form className="community-form join-community" onSubmit={joinCommunity}><div><h3>Entrar com convite</h3><p>Use um código compartilhado por quem administra a comunidade.</p></div><label>Código de convite<input autoComplete="off" required minLength={10} maxLength={32} value={inviteCodeDraft} onChange={event => setInviteCodeDraft(event.target.value)} placeholder="Cole o código de convite" /></label><button className="person-action primary">Entrar</button></form></section>
       <section className="people-section"><h3>Suas comunidades <span>{communities.length}</span></h3>{communities.length ? communities.map(community => <article className={`community-card ${selectedCommunity?.id === community.id ? 'selected' : ''}`} key={community.id}>
         <button className="community-card-heading" onClick={() => { setSelectedCommunityId(community.id); setCommunityPickerId(community.id); void refreshCommunityMembers(community.id) }}><span className="avatar violet">{community.name.slice(0, 1).toLocaleUpperCase('pt-BR')}</span><span className="person-info"><strong>{community.name}</strong><span>{community.memberCount} participantes · {community.role === 'owner' ? 'responsável' : community.role === 'admin' ? 'administrador' : 'participante'}</span></span></button>
-        {community.inviteCode && <div className="invite-code-row"><span>Código para convidar</span><code>{community.inviteCode}</code></div>}
+        {community.inviteCode && <div className="invite-code-row"><span>Código para convidar</span><code>{community.inviteCode}</code><button className="person-action" onClick={() => { setSelectedCommunityId(community.id); void rotateSelectedInvite() }}>Renovar</button></div>}
         {community.channels.map(channel => <button className="community-channel-item" key={channel.id} onClick={() => { setSelectedCommunityId(community.id); void openConversation(channel.conversationId) }}><span>#</span>{channel.name}<small>Abrir canal</small></button>)}
       </article>) : <p className="empty-people">Crie uma comunidade ou entre com um convite para começar.</p>}</section>
       {selectedCommunity && (selectedCommunity.role === 'owner' || selectedCommunity.role === 'admin') && <section className="people-section"><form className="community-form add-channel" onSubmit={createChannel}><div><h3>Novo canal em {selectedCommunity.name}</h3><p>Use letras, números ou hífens, de 2 a 32 caracteres.</p></div><label>Nome do canal<input autoComplete="off" required minLength={2} maxLength={32} value={channelNameDraft} onChange={event => setChannelNameDraft(event.target.value)} placeholder="ex.: novidades" /></label><button className="person-action primary">Criar canal</button></form></section>}
