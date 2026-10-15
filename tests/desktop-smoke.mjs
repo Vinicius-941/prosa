@@ -16,7 +16,7 @@ const debugPort = address.port
 await new Promise((resolve, reject) => portServer.close(error => error ? reject(error) : resolve()))
 
 const dataDirectory = await mkdtemp(path.join(tmpdir(), 'prosa-desktop-smoke-'))
-const child = spawn(executable, [`--remote-debugging-port=${debugPort}`, `--prosa-test-user-data=${dataDirectory}`], {
+const child = spawn(executable, [...(process.platform === 'linux' ? ['--no-sandbox'] : []), `--remote-debugging-port=${debugPort}`, `--prosa-test-user-data=${dataDirectory}`], {
   stdio: 'inherit',
   env: { ...process.env, XDG_CONFIG_HOME: path.join(dataDirectory, 'xdg-config') },
 })

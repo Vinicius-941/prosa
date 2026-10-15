@@ -55,6 +55,8 @@ jobs:
       - run: npm ci
       - run: npm run build:desktop
       - run: npx electron-builder --linux AppImage deb --publish never
+      - name: Smoke test Linux desktop package
+        run: xvfb-run -a node tests/desktop-smoke.mjs artifacts/linux-unpacked/prosa
       - uses: actions/upload-artifact@v6
         with:
           name: release-linux
