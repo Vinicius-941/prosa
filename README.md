@@ -6,13 +6,13 @@ Prosa is an independent communication app focused on clear, welcoming conversati
 
 The client supports account creation, sign-in, per-device active-session listing and revocation, password changes that disconnect other sessions, user discovery, connection requests, direct conversations between connected accounts, invite-based communities and text channels, authenticated message search, and persisted messages delivered over a live connection. The API stores accounts, sessions, connections, conversations, and messages in SQLite. Passwords use Argon2id and bearer session values are stored as SHA-256 digests.
 
-This is an early development foundation. Email verification, account recovery, multi-factor authentication, shared multi-device synchronization, attachments, moderation, voice/video, and Android are not implemented. Do not expose this local service to the public internet or use it for production accounts.
+This is an early development foundation. Email verification, account recovery, multi-factor authentication, shared multi-device synchronization, attachments, moderation, and voice/video are not implemented. Android is available as a debug preview and requires a separately hosted API.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the detailed feature matrix and remaining work.
 
 ## Android preview
 
-The Android client is an installable Capacitor application that uses the same Prosa client and connects to an independently hosted Prosa API. On first launch, enter the API's HTTPS base address. Configure that service's `CLIENT_ORIGIN` to allow `https://localhost`, the Android WebView origin. Android source is in `android/`; build the web assets and sync them with `npm run android:sync`, then run the Gradle `assembleDebug` task from that directory. The CI workflow builds a debug APK for each change. A public production API, signed release APK/AAB, push notifications, and device-level session credential storage are not yet configured.
+The Android client is an installable Capacitor application that uses the same Prosa client and connects to an independently hosted Prosa API. On first launch, enter the API's HTTPS base address. Configure that service's `CLIENT_ORIGIN` to allow `https://localhost`, the Android WebView origin. Android source is in `android/`; build the web assets and sync them with `npm run android:sync`, then run the Gradle `assembleDebug` task from that directory. The CI workflow builds a debug APK for each change. A public API is not hosted by this repository; signed release APK/AAB, push notifications, and device-level session credential storage are not yet configured.
 
 ## Requirements
 
@@ -36,11 +36,11 @@ The client runs at `http://localhost:5173`; the API runs at `http://localhost:87
 
 Create a client and service production build with `npm run build:desktop`. Start the API separately with `npm run api:start` during development.
 
-## Service deployment foundation
+## Service deployment
 
 A production start command is available with `npm run api:start:prod` after `npm run build:service`. Copy `.env.example` to `.env` and set `NODE_ENV=production`, a persistent absolute `PROSA_DATA_DIR`, a valid `PORT`, and `CLIENT_ORIGIN` to the exact browser origins that should be accepted. Production startup rejects a missing or wildcard origin configuration, and `HOST` defaults to the local-only address unless explicitly set by the deployment environment. The API handles `SIGINT` and `SIGTERM` by stopping new connections before closing the database. `GET /api/health` checks the database connection and returns 503 when it is unavailable.
 
-This is deployment preparation, not a hosted service. No public server, TLS endpoint, backups, migration procedure, multi-instance storage, or monitoring account is configured by this repository. Keep the API behind a TLS-terminating reverse proxy and use persistent, backed-up storage before onboarding accounts.
+`deploy/compose.yaml` provides a single-server Docker deployment with persistent SQLite storage and Caddy-managed HTTPS. Follow [docs/deployment.md](docs/deployment.md) to set a domain and allowed origins before starting it. This repository does not provision or operate the server; the operator must configure DNS, network access, off-server backups, and restore checks. The SQLite deployment supports one API instance.
 
 Run the account, connection-request, access-control, message-persistence, and live-delivery integration check with `npm test`.
 

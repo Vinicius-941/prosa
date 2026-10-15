@@ -1,0 +1,17 @@
+.git
+.github
+.vscode
+android
+artifacts
+data
+dist
+dist-server
+desktop
+docs
+node_modules
+outputs
+tests
+work-testdata
+.env
+.env.*
+!.env.example

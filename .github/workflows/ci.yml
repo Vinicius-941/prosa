@@ -56,3 +56,29 @@ jobs:
       - run: npm run build
       - run: npm run build:service
       - run: npx electron-builder --dir --${{ matrix.package }} --publish never
+
+  service-container:
+    name: Service container · health check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build service image
+        run: docker build --tag prosa-api:ci .
+      - name: Start service and check health
+        shell: bash
+        run: |
+          docker run --detach --rm --name prosa-api-ci \
+            --publish 127.0.0.1:18787:8787 \
+            --env NODE_ENV=production \
+            --env CLIENT_ORIGIN=https://localhost \
+            prosa-api:ci
+          cleanup() { docker stop prosa-api-ci >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18787/api/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs prosa-api-ci
+          exit 1

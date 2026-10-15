@@ -1,0 +1,4 @@
+{$PROSA_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy prosa-api:8787
+}
