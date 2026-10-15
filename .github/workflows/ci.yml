@@ -18,11 +18,18 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
+      - name: Select a native build tool for the Windows runner
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          npm install --global node-gyp@13.1.0
+          $nodeGypPath = Join-Path (npm root -g) 'node-gyp\bin\node-gyp.js'
+          npm config set node_gyp $nodeGypPath
       - run: npm ci
       - run: npm test
       - run: npm run lint
