@@ -194,6 +194,12 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     assert.equal(joined.ok, true)
     const joinedChannel = await new Promise<{ ok: boolean }>(resolve => brunoSocket.emit('conversation:join', generalChannel.conversationId, resolve))
     assert.equal(joinedChannel.ok, true)
+    const notificationEvent = new Promise<{ conversationId: string; messageId: string; author: string }>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Timed out waiting for a notification event')), 3000)
+      brunoSocket.once('notification:new', event => { clearTimeout(timeout); resolve(event) })
+    })
+    const notificationSettings = await request<{ settings: { conversationId: string; mutedUntil: number }[] }>('/notification-settings', bruno.token)
+    assert.equal(notificationSettings.settings.some(setting => setting.conversationId === accepted.conversationId), false)
 
     const nextLiveMessage = new Promise<{ text: string }>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Timed out waiting for a live message')), 3000)
@@ -204,6 +210,21 @@ test('two accounts connect, exchange persisted live messages, and unrelated acco
     })
     assert.equal(sent.message.text, 'Mensagem em tempo real')
     assert.equal((await nextLiveMessage).text, sent.message.text)
+    assert.equal((await notificationEvent).messageId, sent.message.id)
+    const muted = await request<{ conversationId: string; mutedUntil: number }>(`/conversations/${accepted.conversationId}/notification-settings`, bruno.token, {
+      method: 'PUT', body: JSON.stringify({ muteForMs: 3600000 }),
+    })
+    assert.ok(muted.mutedUntil > Date.now())
+    const mutedList = await request<{ settings: { conversationId: string; mutedUntil: number }[] }>('/notification-settings', bruno.token)
+    assert.equal(mutedList.settings[0].conversationId, accepted.conversationId)
+    const outsiderMute = await sendHttp(`/conversations/${accepted.conversationId}/notification-settings`, carla.token, {
+      method: 'PUT', body: JSON.stringify({ muteForMs: 3600000 }),
+    })
+    assert.equal(outsiderMute.status, 404)
+    const invalidMute = await sendHttp(`/conversations/${accepted.conversationId}/notification-settings`, bruno.token, {
+      method: 'PUT', body: JSON.stringify({ muteForMs: 12345 }),
+    })
+    assert.equal(invalidMute.status, 400)
 
     const liveReaction = new Promise<{ messageId: string; userId: string; emoji: string; count: number }>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Timed out waiting for a message reaction')), 3000)

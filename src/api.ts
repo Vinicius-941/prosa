@@ -110,6 +110,8 @@ export const api = {
   toggleReaction: (conversationId: string, messageId: string, emoji: string) => request<{ reaction: ApiReaction }>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/reactions`, { method: 'PUT', body: JSON.stringify({ emoji }) }),
   pins: (conversationId: string) => request<{ pins: ApiPin[] }>(`/conversations/${encodeURIComponent(conversationId)}/pins`),
   setPinned: (conversationId: string, messageId: string, pinned: boolean) => request<{ messageId: string; conversationId: string; pinned: boolean }>(`/conversations/${encodeURIComponent(conversationId)}/messages/${encodeURIComponent(messageId)}/pin`, { method: 'PUT', body: JSON.stringify({ pinned }) }),
+  notificationSettings: () => request<{ settings: { conversationId: string; mutedUntil: number }[] }>('/notification-settings'),
+  setMuted: (conversationId: string, muteForMs: number) => request<{ conversationId: string; mutedUntil: number }>(`/conversations/${encodeURIComponent(conversationId)}/notification-settings`, { method: 'PUT', body: JSON.stringify({ muteForMs }) }),
   searchUsers: (query: string) => request<{ users: ApiPerson[] }>(`/users/search?q=${encodeURIComponent(query)}`),
   friends: () => request<ApiFriendData>('/friends'),
   requestFriend: (username: string) => request<{ status: 'pending' | 'accepted'; id?: string; conversationId?: string }>('/friend-requests', { method: 'POST', body: JSON.stringify({ username }) }),

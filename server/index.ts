@@ -71,6 +71,13 @@ db.exec(`
     pinned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS message_pins_conversation_time ON message_pins(conversation_id, pinned_at DESC);
+  CREATE TABLE IF NOT EXISTS conversation_notification_settings (
+    conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    muted_until INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (conversation_id, user_id)
+  );
   CREATE TABLE IF NOT EXISTS conversation_reads (
     conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -728,6 +735,27 @@ app.get('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res) 
   return res.json({ messages, nextCursor })
 })
 
+app.get('/api/notification-settings', requireAuth, (req: AuthRequest, res) => {
+  const settings = db.prepare(`SELECT conversation_id AS conversationId, muted_until AS mutedUntil FROM conversation_notification_settings
+    WHERE user_id = ? AND muted_until > ?`).all(req.user!.id, Date.now())
+  return res.json({ settings })
+})
+
+app.put('/api/conversations/:id/notification-settings', requireAuth, (req: AuthRequest, res) => {
+  const conversationId = req.params.id
+  if (!canAccessConversation(conversationId, req.user!.id)) return res.status(404).json({ error: 'Conversa não encontrada.' })
+  const rawDuration = Number(req.body?.muteForMs)
+  if (![0, 60 * 60 * 1000, 8 * 60 * 60 * 1000, 24 * 60 * 60 * 1000, 7 * 24 * 60 * 60 * 1000].includes(rawDuration)) {
+    return res.status(400).json({ error: 'Escolha um período permitido para silenciar.' })
+  }
+  const mutedUntil = rawDuration === 0 ? 0 : Date.now() + rawDuration
+  if (mutedUntil) db.prepare(`INSERT INTO conversation_notification_settings (conversation_id, user_id, muted_until) VALUES (?, ?, ?)
+    ON CONFLICT(conversation_id, user_id) DO UPDATE SET muted_until = excluded.muted_until, updated_at = CURRENT_TIMESTAMP`)
+    .run(conversationId, req.user!.id, mutedUntil)
+  else db.prepare('DELETE FROM conversation_notification_settings WHERE conversation_id = ? AND user_id = ?').run(conversationId, req.user!.id)
+  return res.json({ conversationId, mutedUntil })
+})
+
 type ApiMessageRow = { id: string; conversationId: string; authorId: string; author: string; text: string; createdAt: string; editedAt: string | null; deletedAt: string | null; replyToId?: string | null; pinned: number }
 
 app.post('/api/conversations/:id/read', requireAuth, (req: AuthRequest, res) => {
@@ -788,8 +816,13 @@ app.post('/api/conversations/:id/messages', requireAuth, (req: AuthRequest, res)
   const createdAt = new Date().toISOString()
   db.prepare('INSERT INTO messages (id, conversation_id, author_id, body, created_at, reply_to) VALUES (?, ?, ?, ?, ?, ?)').run(id, req.params.id, req.user!.id, text, createdAt, replyTo?.id ?? null)
   const message = { id, conversationId: req.params.id, authorId: req.user!.id, author: req.user!.displayName, text, createdAt, editedAt: null, deletedAt: null, replyTo, reactions: [] }
-  const recipients = db.prepare('SELECT user_id AS userId FROM conversation_members WHERE conversation_id = ?').all(req.params.id) as { userId: string }[]
-  for (const recipient of recipients) io.to(`user:${recipient.userId}`).emit('message:new', message)
+  const recipients = db.prepare(`SELECT cm.user_id AS userId, COALESCE(ns.muted_until, 0) AS mutedUntil
+    FROM conversation_members cm LEFT JOIN conversation_notification_settings ns ON ns.conversation_id = cm.conversation_id AND ns.user_id = cm.user_id
+    WHERE cm.conversation_id = ?`).all(req.params.id) as { userId: string; mutedUntil: number }[]
+  for (const recipient of recipients) {
+    io.to(`user:${recipient.userId}`).emit('message:new', message)
+    if (recipient.userId !== req.user!.id && recipient.mutedUntil <= Date.now()) io.to(`user:${recipient.userId}`).emit('notification:new', { conversationId: req.params.id, messageId: id, author: message.author, preview: text.slice(0, 120) })
+  }
   return res.status(201).json({ message })
 })
 
