@@ -11,8 +11,9 @@ A feature is marked implemented only when the behavior exists in the application
 | User discovery | Implemented (username search) | Authenticated prefix search, result limit, and search rate limit |
 | Connection requests | Implemented | Requests can be sent, accepted, dismissed, and removed; requests are rate-limited |
 | Direct conversations between connected accounts | Implemented (early) | A private, shared conversation is created on acceptance; removing a connection hides and revokes access to it |
-| Persistent message create and history | Implemented | Messages are stored in SQLite, restricted to authorized participants, fetched with stable cursor pagination, support same-conversation replies and curated emoji reactions, and can be edited or removed by their author |
-| Real-time message delivery | Implemented (early) | Authenticated Socket.IO session and conversation membership; new, edited, removed, and reacted messages sync live; reconnect supported; offline messages and reply context remain available in paginated history |
+| Persistent message create and history | Implemented | Messages are stored in SQLite, restricted to authorized participants, fetched with stable cursor pagination, support same-conversation replies, curated emoji reactions, and pinning, and can be edited or removed by their author |
+| Pinned messages | Implemented (early) | Authorized members can pin and unpin messages, view the latest 100 pins, navigate to a pinned message, and see changes live; deleting a message clears its pin |
+| Real-time message delivery | Implemented (early) | Authenticated Socket.IO session and conversation membership; new, edited, removed, reacted, and pinned messages sync live; reconnect supported; offline messages and reply context remain available in paginated history |
 | Per-user read states | Implemented (early) | Read position is persisted per account; conversation list provides unread counts |
 | Conversation search | Implemented (early) | Authenticated, rate-limited message search covers only conversations the account can still access; selecting a match opens its message context |
 | Communities and text channels | Implemented (early) | Invite-code entry, owner/member access, owner-only channel creation, persisted channel messages; admin controls, leaving communities, moderation, and broader role management remain |
