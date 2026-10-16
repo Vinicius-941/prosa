@@ -7,10 +7,14 @@ RUN apt-get update \
 
 COPY package.json package-lock.json ./
 RUN npm ci
-COPY server ./server
-RUN npm run build:service && npm prune --omit=dev
+COPY . .
+RUN npm run build && npm run build:service && npm prune --omit=dev
 
-FROM node:22-bookworm-slim AS runtime
+FROM nginx:1.29-alpine AS web
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+
+FROM node:22-bookworm-slim AS api
 ENV NODE_ENV=production \
     HOST=0.0.0.0 \
     PORT=8787 \

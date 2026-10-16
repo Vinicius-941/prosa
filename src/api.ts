@@ -150,6 +150,7 @@ export const api = {
     return result.user
   },
   me: () => request<{ user: ProsaUser }>('/me'),
+  iceServers: () => request<{ iceServers: RTCIceServer[] }>('/calls/ice-servers'),
   updateProfile: (profile: Pick<ProsaUser, 'displayName' | 'username' | 'bio' | 'avatarColor' | 'avatarFrame'>) => request<{ user: ProsaUser }>('/me', { method: 'PATCH', body: JSON.stringify(profile) }),
   async exportAccount() {
     const headers = new Headers()
