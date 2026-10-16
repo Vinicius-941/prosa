@@ -6,7 +6,7 @@ Prosa is an independent communication app focused on clear, welcoming conversati
 
 The client supports account creation, sign-in, per-device active-session listing and revocation, password changes that disconnect other sessions, JSON data export, password-confirmed account deletion, user discovery, connection requests, direct conversations between connected accounts, invite-based communities and text channels, community owner/admin/member controls, authenticated message search, replies, emoji reactions, pinned messages, per-conversation notification controls, and early one-to-one audio calls. Messages, reactions, and pins persist in SQLite and sync over a live connection. Notification events are sent in real time and can be muted per account for up to seven days. Passwords use Argon2id and bearer session values are stored as SHA-256 digests.
 
-This is an early development foundation. Email verification, account recovery, multi-factor authentication, shared multi-device synchronization, attachments, moderation, video, and group calls are not implemented. One-to-one audio uses peer-to-peer WebRTC and a public STUN service; restrictive networks may need TURN, which is not configured yet. Android is available as a debug preview and requires a separately hosted API. The audio implementation still needs testing on physical devices and different networks.
+This is an early development foundation. Email verification, account recovery, multi-factor authentication, shared multi-device synchronization, attachments, moderation, and group calls are not implemented. Direct calls support audio, video, and screen sharing on browsers and desktop systems with WebRTC display capture. The deployment includes a TURN relay for restrictive networks; Android screen sharing depends on platform support and remains unavailable in the current client. Calls still need testing on physical devices and different networks.
 
 Electron stores its session token with the operating system's secure-storage facility. Linux requires an available system keyring. Android encrypts the session token with an AES-GCM key held by Android Keystore and migrates the previous web-storage copy after it can read the protected vault. Browser sessions use HttpOnly cookies and CSRF checks; production deployments should serve the client and API from the same site or through a shared-domain proxy because browsers may block third-party cookies.
 
@@ -40,15 +40,15 @@ The client uses system fonts and does not need a remote font service. Run `npm r
 
 Create a client and service production build with `npm run build:desktop`. Start the API separately with `npm run api:start` during development.
 
-## Service deployment
+## Public service deployment
 
-A production start command is available with `npm run api:start:prod` after `npm run build:service`. Copy `.env.example` to `.env` and set `NODE_ENV=production`, a persistent absolute `PROSA_DATA_DIR`, a valid `PORT`, and `CLIENT_ORIGIN` to the exact browser origins that should be accepted. Production startup rejects a missing or wildcard origin configuration, and `HOST` defaults to the local-only address unless explicitly set by the deployment environment. The API handles `SIGINT` and `SIGTERM` by stopping new connections before closing the database. `GET /api/health` checks the database connection and returns 503 when it is unavailable.
+A production start command is available with `npm run api:start:prod` after `npm run build:service`. The Docker Compose stack serves the web app and API on the same HTTPS domain, and runs Caddy for certificates plus Coturn for media relay. Set `PROSA_DOMAIN`, `CLIENT_ORIGIN`, `TURN_URL`, `TURN_EXTERNAL_IP`, and a private `TURN_SHARED_SECRET` in `.env.production`; use an absolute persistent `PROSA_DATA_DIR`. Production startup rejects a missing or wildcard client origin. The API handles `SIGINT` and `SIGTERM` by stopping new connections before closing the database. `GET /api/health` checks the database connection and returns 503 when it is unavailable.
 
-`deploy/compose.yaml` provides a single-server Docker deployment with persistent SQLite storage and Caddy-managed HTTPS. Follow [docs/deployment.md](docs/deployment.md) to set a domain and allowed origins before starting it. This repository does not provision or operate the server; the operator must configure DNS, network access, off-server backups, and restore checks. The SQLite deployment supports one API instance.
+`deploy/compose.yaml` provides a single-server Docker deployment with persistent SQLite storage, Caddy-managed HTTPS, a static web client, and time-limited TURN credentials for Coturn. Follow [docs/deployment.md](docs/deployment.md) to set the domain, public IP, firewall, and allowed origins before starting it. This repository does not provision or operate the server; the operator must provide the machine, DNS, network access, off-server backups, and restore checks. The SQLite deployment supports one API instance.
 
 Run the account, connection-request, access-control, message-persistence, and live-delivery integration check with `npm test`.
 
-Latest published release: **0.1.2**. Version **0.1.3 is being prepared locally** and is not published; see [draft notes](docs/releases/0.1.3.md) and the [design audit](docs/research/prosa-0.1.3-design.md).
+Latest published release: **0.1.3**. Version 1.4.0 is being prepared with one-to-one calls and public-server deployment; see [deployment instructions](docs/deployment.md).
 
 Account export and deletion behavior is described in [docs/account-data.md](docs/account-data.md).
 

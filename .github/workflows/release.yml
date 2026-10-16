@@ -109,7 +109,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          VERSION="${TAG#v}"
           gh release create "$TAG" release-assets/* \
             --repo "$GITHUB_REPOSITORY" \
             --title "Prosa $TAG" \
-            --notes-file docs/releases/0.1.3-announcement.md
+            --notes-file "docs/releases/${VERSION}-announcement.md"

@@ -2,7 +2,7 @@
   "name": "prosa",
   "productName": "Prosa",
   "private": true,
-  "version": "0.1.3",
+  "version": "1.4.0",
   "description": "Um aplicativo de comunicação para conversas diretas e comunidades.",
   "author": {
     "name": "Prosa contributors",

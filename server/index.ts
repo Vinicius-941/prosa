@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { createHash, randomBytes } from 'node:crypto'
+import { createHash, createHmac, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdirSync } from 'node:fs'
 import path from 'node:path'
@@ -21,6 +21,11 @@ if (production && (!configuredOrigins?.length || configuredOrigins.includes('*')
 if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error('PORT precisa ser uma porta válida entre 0 e 65535.')
 if (production && port === 0) throw new Error('PORT 0 não é permitido em produção.')
 const allowedOrigins = configuredOrigins?.length ? configuredOrigins : ['http://localhost:5173']
+const turnUrls = process.env.TURN_URL?.split(',').map(url => url.trim()).filter(Boolean) ?? []
+const turnSharedSecret = process.env.TURN_SHARED_SECRET
+if (Boolean(turnUrls.length) !== Boolean(turnSharedSecret)) throw new Error('TURN_URL e TURN_SHARED_SECRET precisam ser configurados juntos.')
+if (turnUrls.some(url => !/^turns?:[^\s,]+$/i.test(url))) throw new Error('TURN_URL aceita apenas endereços turn: ou turns:.')
+if (production && turnSharedSecret && Buffer.byteLength(turnSharedSecret) < 32) throw new Error('TURN_SHARED_SECRET precisa ter ao menos 32 bytes em produção.')
 const dataDir = path.resolve(process.env.PROSA_DATA_DIR ?? 'data')
 mkdirSync(dataDir, { recursive: true })
 const db = new Database(path.join(dataDir, 'prosa.sqlite'))
@@ -179,6 +184,7 @@ db.exec(`
 
 const app = express()
 app.disable('x-powered-by')
+app.set('trust proxy', process.env.TRUST_PROXY === '1' ? 1 : false)
 app.use(helmet())
 app.use(cors({ origin: allowedOrigins, credentials: true, exposedHeaders: ['x-prosa-session-migrated'] }))
 function cookieValue(header: string | undefined, name: string) {
@@ -273,7 +279,7 @@ io.on('connection', socket => {
       JOIN conversation_members peer ON peer.conversation_id = c.id AND peer.user_id <> ?
       WHERE c.id = ?`).get(user.id, user.id, conversationId) as { kind: string; peerUserId: string } | undefined
     if (!direct || direct.kind !== 'direct') return acknowledge?.({ ok: false, error: 'Chamadas estão disponíveis apenas em conversas diretas.' })
-    if (type === 'invite' && payload !== undefined) return acknowledge?.({ ok: false, error: 'Convite de chamada inválido.' })
+    if (type === 'invite' && payload !== undefined && (!payload || typeof payload !== 'object' || !['audio', 'video'].includes((payload as { media?: unknown }).media as string))) return acknowledge?.({ ok: false, error: 'Convite de chamada inválido.' })
     for (const [staleId, staleCall] of activeCalls) if (Date.now() - staleCall.createdAt > 5 * 60_000) activeCalls.delete(staleId)
     if (type !== 'invite' && !activeCalls.has(callId)) return acknowledge?.({ ok: false, error: 'Essa chamada não está mais ativa.' })
     if (type === 'invite') {
@@ -388,6 +394,16 @@ app.get('/api/health', (_req, res) => {
   } catch {
     return res.status(503).json({ status: 'unavailable', service: 'prosa' })
   }
+})
+
+app.get('/api/calls/ice-servers', requireAuth, rateLimit({ windowMs: 60_000, limit: 30, keyGenerator: req => (req as AuthRequest).user!.id, standardHeaders: 'draft-8', legacyHeaders: false }), (req: AuthRequest, res) => {
+  const iceServers: { urls: string | string[]; username?: string; credential?: string }[] = [{ urls: 'stun:stun.l.google.com:19302' }]
+  if (turnUrls.length && turnSharedSecret) {
+    const username = `${Math.floor(Date.now() / 1000) + 3600}:${req.user!.id}`
+    const credential = createHmac('sha1', turnSharedSecret).update(username).digest('base64')
+    iceServers.push({ urls: turnUrls, username, credential })
+  }
+  return res.json({ iceServers })
 })
 
 app.get('/api/auth/csrf', (req, res) => {

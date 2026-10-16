@@ -9,6 +9,9 @@ services:
       PORT: 8787
       PROSA_DATA_DIR: /var/lib/prosa
       CLIENT_ORIGIN: ${CLIENT_ORIGIN:?Set CLIENT_ORIGIN in .env.production}
+      TRUST_PROXY: "1"
+      TURN_URL: ${TURN_URL:?Set TURN_URL in .env.production}
+      TURN_SHARED_SECRET: ${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env.production}
     expose:
       - "8787"
     volumes:
@@ -33,11 +36,49 @@ services:
         max-size: 10m
         max-file: "3"
 
+  prosa-web:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: web
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  coturn:
+    image: coturn/coturn:4.18.0
+    network_mode: host
+    command:
+      - "--log-file=stdout"
+      - "--external-ip=${TURN_EXTERNAL_IP:?Set TURN_EXTERNAL_IP in .env.production}"
+      - "--listening-port=3478"
+      - "--min-port=49160"
+      - "--max-port=49200"
+      - "--fingerprint"
+      - "--use-auth-secret"
+      - "--static-auth-secret=${TURN_SHARED_SECRET:?Set TURN_SHARED_SECRET in .env.production}"
+      - "--realm=${PROSA_DOMAIN:?Set PROSA_DOMAIN in .env.production}"
+      - "--user-quota=4"
+      - "--total-quota=1000"
+      - "--no-multicast-peers"
+      - "--no-loopback-peers"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   caddy:
     image: caddy:2.11.4-alpine
     depends_on:
       prosa-api:
         condition: service_healthy
+      prosa-web:
+        condition: service_started
     environment:
       PROSA_DOMAIN: ${PROSA_DOMAIN:?Set PROSA_DOMAIN in .env.production}
     ports:
